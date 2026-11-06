@@ -112,7 +112,7 @@ Return strictly a JSON object with this exact schema:
   "notes": "string"
 }`;
 
-      const modelName = process.env.GEMINI_MODEL || 'gemini-1.5-flash';
+      const modelName = process.env.GEMINI_MODEL || 'gemini-3.5-flash-lite';
       const endpoint = `https://generativelanguage.googleapis.com/v1beta/models/${modelName}:generateContent?key=${apiKey}`;
 
       const requestBody = {
