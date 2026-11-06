@@ -1,0 +1,26 @@
+services:
+  - type: web
+    name: krishisetu-api
+    env: node
+    plan: starter
+    region: singapore
+    rootDir: server
+    buildCommand: npm install && npm run build && npx prisma db push --schema=prisma/schema.postgresql.prisma
+    startCommand: npm start
+    healthCheckPath: /api/health
+    envVars:
+      - key: NODE_ENV
+        value: production
+      - key: PORT
+        value: 5000
+      - key: DATABASE_URL
+        sync: false
+      - key: JWT_SECRET
+        generateValue: true
+      - key: CLIENT_URL
+        sync: false
+      - key: GEMINI_API_KEY
+        sync: false
+      - key: VISION_PROVIDER
+        value: gemini
+

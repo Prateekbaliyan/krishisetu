@@ -1,0 +1,58 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+@layer base {
+  body {
+    background-color: #F7F9F4;
+    color: #202B22;
+    font-family: 'Inter', 'Noto Sans Devanagari', system-ui, sans-serif;
+  }
+}
+
+/* Print Styles for Official Procurement Slips */
+@media print {
+  body {
+    background-color: #FFFFFF !important;
+  }
+  
+  .no-print,
+  aside,
+  header,
+  nav,
+  button {
+    display: none !important;
+  }
+
+  main {
+    padding: 0 !important;
+    margin: 0 !important;
+    max-width: 100% !important;
+  }
+
+  .print-slip {
+    box-shadow: none !important;
+    border: 1px solid #24452F !important;
+    width: 100% !important;
+    max-width: 100% !important;
+    padding: 16px !important;
+    margin: 0 auto !important;
+  }
+}
+
+/* Custom subtle scrollbar */
+::-webkit-scrollbar {
+  width: 6px;
+  height: 6px;
+}
+::-webkit-scrollbar-track {
+  background: #F7F9F4;
+}
+::-webkit-scrollbar-thumb {
+  background: #E5EAE1;
+  border-radius: 4px;
+}
+::-webkit-scrollbar-thumb:hover {
+  background: #738071;
+}
+

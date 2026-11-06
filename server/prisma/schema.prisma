@@ -1,0 +1,228 @@
+datasource db {
+  provider = "sqlite"
+  url      = "file:./dev.db"
+}
+
+generator client {
+  provider = "prisma-client-js"
+}
+
+model User {
+  id           String            @id @default(uuid())
+  email        String            @unique
+  passwordHash String
+  fullName     String
+  role         String            // "OPERATOR" | "MANAGER"
+  centreId     String?
+  centre       CollectionCentre? @relation(fields: [centreId], references: [id])
+  createdAt    DateTime          @default(now())
+  updatedAt    DateTime          @updatedAt
+}
+
+model CollectionCentre {
+  id             String      @id @default(uuid())
+  code           String      @unique // e.g. "C07", "C12", "C01", "C03", "C18"
+  name           String
+  village        String
+  taluka         String
+  district       String      @default("Latur")
+  operatorName   String
+  contactNumber  String
+  isActive       Boolean     @default(true)
+  createdAt      DateTime    @default(now())
+  updatedAt      DateTime    @updatedAt
+  farmers        Farmer[]
+  purchases      Purchase[]
+  users          User[]
+  dispatches     Dispatch[]
+}
+
+model Farmer {
+  id                     String           @id @default(uuid())
+  farmerId               String           @unique // e.g. "MH-LTR-1042"
+  fullName               String
+  village                String
+  centreId               String
+  centre                 CollectionCentre @relation(fields: [centreId], references: [id])
+  landAreaAcres          Float
+  primaryCrop            String           // "Soybean" | "Tur"
+  bankAccountName        String
+  bankAccountNumber      String
+  ifscCode               String
+  bankName               String
+  bankVerificationStatus String           @default("VERIFIED") // "VERIFIED" | "PENDING" | "REJECTED"
+  mobileNumber           String
+  createdAt              DateTime         @default(now())
+  updatedAt              DateTime         @updatedAt
+  purchases              Purchase[]
+  payments               Payment[]
+}
+
+model PriceBoard {
+  id             String   @id @default(uuid())
+  crop           String   // "Soybean" | "Tur"
+  grade          String   // "Grade A", "Grade B", "FAQ"
+  ratePerQuintal Float
+  effectiveDate  String   // "2026-11-05"
+  publishedBy    String
+  publishedAt    DateTime @default(now())
+  isActive       Boolean  @default(true)
+}
+
+model PriceHistory {
+  id             String   @id @default(uuid())
+  crop           String
+  grade          String
+  ratePerQuintal Float
+  effectiveDate  String
+  changedBy      String
+  changeReason   String
+  createdAt      DateTime @default(now())
+}
+
+model Purchase {
+  id                      String            @id @default(uuid())
+  slipNumber              String            @unique // e.g. "C07-24518"
+  idempotencyKey          String            @unique // Client UUID
+  farmerId                String
+  farmer                  Farmer            @relation(fields: [farmerId], references: [id])
+  centreId                String
+  centre                  CollectionCentre  @relation(fields: [centreId], references: [id])
+  crop                    String            // "Soybean" | "Tur"
+  grade                   String            // "Grade A", "Grade B", "FAQ"
+  grossWeight             Float             // kg, 1 decimal place
+  tareWeight              Float             // kg, 1 decimal place
+  actualWeight            Float             // Gross - Tare
+  moisture                Float             // %
+  moistureDeductionPercent Float            // max(0, moisture - 12) * 1%
+  netWeight               Float             // actualWeight * (1 - deduction/100)
+  ratePerQuintal          Float             // ₹/quintal
+  totalAmount             Float             // Net weight * Rate / 100
+  purchaseDate            DateTime          @default(now())
+  status                  String            @default("PENDING_APPROVAL") // "PENDING_APPROVAL" | "APPROVED" | "FLAGGED" | "REJECTED" | "PAID"
+  scalePhotoUrl           String?
+  moisturePhotoUrl        String?
+  scaleAiWeight           Float?
+  moistureAiValue         Float?
+  aiConfidence            Float?
+  aiVerificationStatus    String            @default("NOT_PERFORMED") // "MATCH" | "DIFF_ACCEPTED" | "MANUAL_OVERRIDE" | "FAILED" | "NOT_PERFORMED"
+  aiDiffNotes             String?
+  clientDeviceTimestamp   DateTime?
+  localCreationTimestamp  DateTime?
+  serverReceivedTimestamp DateTime          @default(now())
+  syncStatus              String            @default("SYNCED") // "SYNCED" | "OFFLINE_QUEUED" | "SYNC_FAILED"
+  paymentEligibility      Boolean           @default(true)
+  paymentRunId            String?
+  paymentRun              PaymentRun?       @relation(fields: [paymentRunId], references: [id])
+  isFlagged               Boolean           @default(false)
+  flagReason              String?
+  reviewedBy              String?
+  reviewedAt              DateTime?
+  reviewNotes             String?
+  createdAt               DateTime          @default(now())
+  updatedAt               DateTime          @updatedAt
+  anomalyFlags            AnomalyFlag[]
+  smsLogs                 SmsLog[]
+}
+
+model AnomalyFlag {
+  id          String   @id @default(uuid())
+  purchaseId  String
+  purchase    Purchase @relation(fields: [purchaseId], references: [id], onDelete: Cascade)
+  flagType    String   // "WEIGHT_EXCEEDS_LAND_BENCHMARK" | "DUPLICATE_HOUR_PURCHASE" | "UNIFORM_MOISTURE_STREAK"
+  severity    String   // "HIGH" | "MEDIUM"
+  description String
+  details     String   // JSON string
+  status      String   @default("OPEN") // "OPEN" | "REVIEWED_APPROVED" | "REVIEWED_REJECTED"
+  reviewedBy  String?
+  reviewNotes String?
+  createdAt   DateTime @default(now())
+}
+
+model PaymentRun {
+  id             String     @id @default(uuid())
+  batchNumber    String     @unique // "BATCH-20261105-01"
+  totalFarmers   Int
+  totalPurchases Int
+  totalAmount    Float
+  status         String     @default("PENDING") // "PENDING" | "PROCESSING" | "PAID" | "FAILED"
+  csvFileName    String?
+  csvContent     String?
+  createdBy      String
+  approvedBy     String?
+  processedAt    DateTime?
+  createdAt      DateTime   @default(now())
+  updatedAt      DateTime   @updatedAt
+  purchases      Purchase[]
+  payments       Payment[]
+}
+
+model Payment {
+  id                  String     @id @default(uuid())
+  paymentRunId        String
+  paymentRun          PaymentRun @relation(fields: [paymentRunId], references: [id], onDelete: Cascade)
+  farmerId            String
+  farmer              Farmer     @relation(fields: [farmerId], references: [id])
+  amount              Float
+  bankAccountName     String
+  bankAccountNumber   String
+  ifscCode            String
+  bankReferenceNumber String?
+  status              String     @default("PENDING") // "PENDING" | "PROCESSING" | "PAID" | "FAILED"
+  failureReason       String?
+  paidAt              DateTime?
+  createdAt           DateTime   @default(now())
+  updatedAt           DateTime   @updatedAt
+}
+
+model Dispatch {
+  id             String           @id @default(uuid())
+  centreId       String
+  centre         CollectionCentre @relation(fields: [centreId], references: [id])
+  crop           String
+  truckNumber    String
+  driverName     String
+  driverMobile   String?
+  dispatchWeight Float            // kg
+  destination    String
+  weightLossKg   Float            @default(0)
+  notes          String?
+  dispatchedAt   DateTime         @default(now())
+  createdAt      DateTime         @default(now())
+}
+
+model AuditLog {
+  id           Int      @id @default(autoincrement())
+  entityType   String   // "PURCHASE" | "PRICE" | "PAYMENT" | "FARMER" | "ANOMALY"
+  entityId     String
+  action       String   // "CREATE" | "UPDATE" | "APPROVE" | "REJECT" | "SYNC" | "PAYMENT_RUN"
+  userId       String?
+  userName     String?
+  previousHash String?  // SHA-256 hash chaining
+  eventHash    String   // SHA-256 hash
+  details      String   // JSON string
+  timestamp    DateTime @default(now())
+}
+
+model SyncRecord {
+  id             String   @id @default(uuid())
+  idempotencyKey String   @unique
+  clientId       String
+  centreId       String
+  purchaseSlip   String?
+  status         String   // "SUCCESS" | "CONFLICT" | "FAILED"
+  errorMessage   String?
+  receivedAt     DateTime @default(now())
+}
+
+model SmsLog {
+  id               String   @id @default(uuid())
+  purchaseId       String
+  purchase         Purchase @relation(fields: [purchaseId], references: [id])
+  farmerMobile     String
+  farmerName       String
+  message          String
+  status           String   @default("DELIVERED") // "DELIVERED" | "PENDING" | "FAILED"
+  providerResponse String   // e.g. "SIMULATED_SUCCESS_KSETU_81723"
+  sentAt           DateTime @default(now())
+}

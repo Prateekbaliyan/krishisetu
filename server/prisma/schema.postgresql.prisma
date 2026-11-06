@@ -1,0 +1,269 @@
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+generator client {
+  provider = "prisma-client-js"
+}
+
+model User {
+  id           String            @id @default(uuid())
+  email        String            @unique
+  passwordHash String
+  fullName     String
+  role         String            // "OPERATOR" | "MANAGER"
+  centreId     String?
+  centre       CollectionCentre? @relation(fields: [centreId], references: [id])
+  createdAt    DateTime          @default(now())
+  updatedAt    DateTime          @updatedAt
+
+  @@index([email])
+  @@index([role])
+}
+
+model CollectionCentre {
+  id             String      @id @default(uuid())
+  code           String      @unique // e.g. "C07", "C12", "C01", "C03", "C18"
+  name           String
+  village        String
+  taluka         String
+  district       String      @default("Latur")
+  operatorName   String
+  contactNumber  String
+  isActive       Boolean     @default(true)
+  createdAt      DateTime    @default(now())
+  updatedAt      DateTime    @updatedAt
+  farmers        Farmer[]
+  purchases      Purchase[]
+  users          User[]
+  dispatches     Dispatch[]
+
+  @@index([code])
+}
+
+model Farmer {
+  id                     String           @id @default(uuid())
+  farmerId               String           @unique // e.g. "MH-LTR-1042"
+  fullName               String
+  village                String
+  centreId               String
+  centre                 CollectionCentre @relation(fields: [centreId], references: [id])
+  landAreaAcres          Decimal          @db.Decimal(5, 2)
+  primaryCrop            String           // "Soybean" | "Tur"
+  bankAccountName        String
+  bankAccountNumber      String
+  ifscCode               String
+  bankName               String
+  bankVerificationStatus String           @default("VERIFIED") // "VERIFIED" | "PENDING" | "REJECTED"
+  mobileNumber           String
+  createdAt              DateTime         @default(now())
+  updatedAt              DateTime         @updatedAt
+  purchases              Purchase[]
+  payments               Payment[]
+
+  @@index([farmerId])
+  @@index([centreId])
+  @@index([village])
+}
+
+model PriceBoard {
+  id             String   @id @default(uuid())
+  crop           String   // "Soybean" | "Tur"
+  grade          String   // "Grade A", "Grade B", "FAQ"
+  ratePerQuintal Decimal  @db.Decimal(10, 2)
+  effectiveDate  String   // "2026-11-05"
+  publishedBy    String
+  publishedAt    DateTime @default(now())
+  isActive       Boolean  @default(true)
+
+  @@index([crop, grade, effectiveDate])
+}
+
+model PriceHistory {
+  id             String   @id @default(uuid())
+  crop           String
+  grade          String
+  ratePerQuintal Decimal  @db.Decimal(10, 2)
+  effectiveDate  String
+  changedBy      String
+  changeReason   String
+  createdAt      DateTime @default(now())
+
+  @@index([crop, effectiveDate])
+}
+
+model Purchase {
+  id                      String            @id @default(uuid())
+  slipNumber              String            @unique // e.g. "C07-24518"
+  idempotencyKey          String            @unique // Client UUID
+  farmerId                String
+  farmer                  Farmer            @relation(fields: [farmerId], references: [id])
+  centreId                String
+  centre                  CollectionCentre  @relation(fields: [centreId], references: [id])
+  crop                    String            // "Soybean" | "Tur"
+  grade                   String            // "Grade A", "Grade B", "FAQ"
+  grossWeight             Decimal           @db.Decimal(10, 1) // kg, 1 decimal place
+  tareWeight              Decimal           @db.Decimal(10, 1) // kg, 1 decimal place
+  actualWeight            Decimal           @db.Decimal(10, 1) // Gross - Tare
+  moisture                Decimal           @db.Decimal(4, 1)  // %
+  moistureDeductionPercent Decimal          @db.Decimal(5, 2)  // max(0, moisture - 12) * 1%
+  netWeight               Decimal           @db.Decimal(10, 1) // actualWeight * (1 - deduction/100)
+  ratePerQuintal          Decimal           @db.Decimal(10, 2) // ₹/quintal
+  totalAmount             Decimal           @db.Decimal(12, 2) // Net weight * Rate / 100
+  purchaseDate            DateTime          @default(now())
+  status                  String            @default("PENDING_APPROVAL") // "PENDING_APPROVAL" | "APPROVED" | "FLAGGED" | "REJECTED" | "PAID"
+  scalePhotoUrl           String?
+  moisturePhotoUrl        String?
+  scaleAiWeight           Decimal?          @db.Decimal(10, 1)
+  moistureAiValue         Decimal?          @db.Decimal(4, 1)
+  aiConfidence            Decimal?          @db.Decimal(5, 2)
+  aiVerificationStatus    String            @default("NOT_PERFORMED")
+  aiDiffNotes             String?
+  clientDeviceTimestamp   DateTime?
+  localCreationTimestamp  DateTime?
+  serverReceivedTimestamp DateTime          @default(now())
+  syncStatus              String            @default("SYNCED")
+  paymentEligibility      Boolean           @default(true)
+  paymentRunId            String?
+  paymentRun              PaymentRun?       @relation(fields: [paymentRunId], references: [id])
+  isFlagged               Boolean           @default(false)
+  flagReason              String?
+  reviewedBy              String?
+  reviewedAt              DateTime?
+  reviewNotes             String?
+  createdAt               DateTime          @default(now())
+  updatedAt               DateTime          @updatedAt
+  anomalyFlags            AnomalyFlag[]
+  smsLogs                 SmsLog[]
+
+  @@index([slipNumber])
+  @@index([idempotencyKey])
+  @@index([farmerId])
+  @@index([centreId])
+  @@index([purchaseDate])
+  @@index([status])
+}
+
+model AnomalyFlag {
+  id          String   @id @default(uuid())
+  purchaseId  String
+  purchase    Purchase @relation(fields: [purchaseId], references: [id], onDelete: Cascade)
+  flagType    String   // "WEIGHT_EXCEEDS_LAND_BENCHMARK" | "DUPLICATE_HOUR_PURCHASE" | "UNIFORM_MOISTURE_STREAK"
+  severity    String   // "HIGH" | "MEDIUM"
+  description String
+  details     String   // JSON string
+  status      String   @default("OPEN") // "OPEN" | "REVIEWED_APPROVED" | "REVIEWED_REJECTED"
+  reviewedBy  String?
+  reviewNotes String?
+  createdAt   DateTime @default(now())
+
+  @@index([purchaseId])
+  @@index([status])
+}
+
+model PaymentRun {
+  id             String     @id @default(uuid())
+  batchNumber    String     @unique // "BATCH-20261105-01"
+  totalFarmers   Int
+  totalPurchases Int
+  totalAmount    Decimal    @db.Decimal(14, 2)
+  status         String     @default("PENDING") // "PENDING" | "PROCESSING" | "PAID" | "FAILED"
+  csvFileName    String?
+  csvContent     String?    @db.Text
+  createdBy      String
+  approvedBy     String?
+  processedAt    DateTime?
+  createdAt      DateTime   @default(now())
+  updatedAt      DateTime   @updatedAt
+  purchases      Purchase[]
+  payments       Payment[]
+
+  @@index([batchNumber])
+  @@index([status])
+}
+
+model Payment {
+  id                  String     @id @default(uuid())
+  paymentRunId        String
+  paymentRun          PaymentRun @relation(fields: [paymentRunId], references: [id], onDelete: Cascade)
+  farmerId            String
+  farmer              Farmer     @relation(fields: [farmerId], references: [id])
+  amount              Decimal    @db.Decimal(12, 2)
+  bankAccountName     String
+  bankAccountNumber   String
+  ifscCode            String
+  bankReferenceNumber String?
+  status              String     @default("PENDING") // "PENDING" | "PROCESSING" | "PAID" | "FAILED"
+  failureReason       String?
+  paidAt              DateTime?
+  createdAt           DateTime   @default(now())
+  updatedAt           DateTime   @updatedAt
+
+  @@index([paymentRunId])
+  @@index([farmerId])
+  @@index([status])
+}
+
+model Dispatch {
+  id             String           @id @default(uuid())
+  centreId       String
+  centre         CollectionCentre @relation(fields: [centreId], references: [id])
+  crop           String
+  truckNumber    String
+  driverName     String
+  driverMobile   String?
+  dispatchWeight Decimal          @db.Decimal(10, 1) // kg
+  destination    String
+  weightLossKg   Decimal          @default(0) @db.Decimal(8, 1)
+  notes          String?
+  dispatchedAt   DateTime         @default(now())
+  createdAt      DateTime         @default(now())
+
+  @@index([centreId])
+  @@index([dispatchedAt])
+}
+
+model AuditLog {
+  id           Int      @id @default(autoincrement())
+  entityType   String   // "PURCHASE" | "PRICE" | "PAYMENT" | "FARMER" | "ANOMALY"
+  entityId     String
+  action       String   // "CREATE" | "UPDATE" | "APPROVE" | "REJECT" | "SYNC" | "PAYMENT_RUN"
+  userId       String?
+  userName     String?
+  previousHash String?  // SHA-256 hash chaining
+  eventHash    String   // SHA-256 hash
+  details      String   @db.Text // JSON string
+  timestamp    DateTime @default(now())
+
+  @@index([entityType, entityId])
+  @@index([timestamp])
+}
+
+model SyncRecord {
+  id             String   @id @default(uuid())
+  idempotencyKey String   @unique
+  clientId       String
+  centreId       String
+  purchaseSlip   String?
+  status         String   // "SUCCESS" | "CONFLICT" | "FAILED"
+  errorMessage   String?
+  receivedAt     DateTime @default(now())
+
+  @@index([idempotencyKey])
+  @@index([centreId])
+}
+
+model SmsLog {
+  id               String   @id @default(uuid())
+  purchaseId       String
+  purchase         Purchase @relation(fields: [purchaseId], references: [id])
+  farmerMobile     String
+  farmerName       String
+  message          String   @db.Text
+  status           String   @default("DELIVERED") // "DELIVERED" | "PENDING" | "FAILED"
+  providerResponse String   // e.g. "SIMULATED_SUCCESS_KSETU_81723"
+  sentAt           DateTime @default(now())
+
+  @@index([purchaseId])
+}

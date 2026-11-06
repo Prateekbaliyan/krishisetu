@@ -1,0 +1,17 @@
+{
+  "short_name": "KrishiSetu",
+  "name": "KrishiSetu – Farmer Procurement & Payment Management System",
+  "icons": [
+    {
+      "src": "data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 192 192' fill='%23527A50'><rect width='192' height='192' rx='36' fill='%23527A50'/><path d='M96 32L36 78v82h120V78L96 32zm0 28l48 37v59H48V97l48-37zm-8 44h16v36H88z' fill='%23FFFFFF'/></svg>",
+      "type": "image/svg+xml",
+      "sizes": "192x192"
+    }
+  ],
+  "start_url": "/",
+  "background_color": "#F7F9F4",
+  "theme_color": "#527A50",
+  "display": "standalone",
+  "orientation": "portrait"
+}
+

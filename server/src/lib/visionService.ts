@@ -1,0 +1,275 @@
+import fs from 'fs';
+import path from 'path';
+
+export interface VisionAnalysisResult {
+  provider: 'gemini' | 'mock' | 'unconfigured';
+  success: boolean;
+  meterType: 'SCALE' | 'MOISTURE';
+  detectedValue: number | null;
+  unit: string | null;
+  confidence: number; // 0.0 - 1.0
+  isReadable: boolean;
+  notes: string;
+  rawResponse?: string;
+  error?: string;
+}
+
+export interface VerificationComparison {
+  manualValue: number;
+  aiValue: number | null;
+  difference: number | null;
+  withinTolerance: boolean;
+  toleranceApplied: number;
+  status: 'MATCH' | 'DIFF_ACCEPTED' | 'MANUAL_OVERRIDE' | 'FAILED' | 'NOT_PERFORMED';
+  message: string;
+}
+
+const SCALE_TOLERANCE_KG = 2.0;       // Max allowable difference without warning
+const MOISTURE_TOLERANCE_PCT = 0.5;   // Max allowable moisture diff without warning
+
+/**
+ * Analyzes scale or moisture meter image using Gemini Vision API if key is configured,
+ * or safely reports unconfigured provider / mock provider with strict non-fabrication.
+ */
+export async function analyzeMeterImage(
+  imageBuffer: Buffer,
+  mimeType: string,
+  meterType: 'SCALE' | 'MOISTURE'
+): Promise<VisionAnalysisResult> {
+  const apiKey = process.env.GEMINI_API_KEY;
+  const provider = process.env.VISION_PROVIDER || (apiKey ? 'gemini' : 'unconfigured');
+
+  if (provider === 'gemini') {
+    if (!apiKey) {
+      return {
+        provider: 'unconfigured',
+        success: false,
+        meterType,
+        detectedValue: null,
+        unit: null,
+        confidence: 0,
+        isReadable: false,
+        notes: 'GEMINI_API_KEY is not configured in environment variables. Vision analysis cannot be performed.',
+        error: 'API_KEY_MISSING'
+      };
+    }
+
+    try {
+      const base64Data = imageBuffer.toString('base64');
+      const promptText = meterType === 'SCALE'
+        ? `You are an OCR vision assistant for agricultural weighing scale verification. 
+Examine this photograph of an electronic weighing scale LCD/LED indicator display. 
+Extract:
+1. The numeric gross weight value shown on the digital display (in kilograms).
+2. The unit displayed (kg or t).
+3. Confidence score between 0.00 and 1.00 based on image clarity, glare and readability.
+4. Boolean isReadable indicating if the display digits are clear.
+5. Brief notes on glare, angle, or digit visibility.
+
+Return strictly a JSON object with this exact schema:
+{
+  "detectedValue": number,
+  "unit": "kg",
+  "confidence": number,
+  "isReadable": boolean,
+  "notes": "string"
+}`
+        : `You are an OCR vision assistant for agricultural grain moisture meter verification.
+Examine this photograph of an electronic moisture meter LCD/LED display.
+Extract:
+1. The numeric moisture percentage shown on the digital display (e.g., 11.5, 13.8).
+2. The unit (%).
+3. Confidence score between 0.00 and 1.00 based on image clarity and readability.
+4. Boolean isReadable indicating if the display digits are clear.
+5. Brief notes on display status or lighting.
+
+Return strictly a JSON object with this exact schema:
+{
+  "detectedValue": number,
+  "unit": "%",
+  "confidence": number,
+  "isReadable": boolean,
+  "notes": "string"
+}`;
+
+      // Call Gemini 1.5 Flash API directly using fetch
+      const endpoint = `https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-flash:generateContent?key=${apiKey}`;
+      const requestBody = {
+        contents: [
+          {
+            parts: [
+              { text: promptText },
+              {
+                inline_data: {
+                  mime_type: mimeType || 'image/jpeg',
+                  data: base64Data
+                }
+              }
+            ]
+          }
+        ],
+        generationConfig: {
+          temperature: 0.1,
+          responseMimeType: 'application/json'
+        }
+      };
+
+      const response = await fetch(endpoint, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(requestBody)
+      });
+
+      if (!response.ok) {
+        const errorText = await response.text();
+        return {
+          provider: 'gemini',
+          success: false,
+          meterType,
+          detectedValue: null,
+          unit: null,
+          confidence: 0,
+          isReadable: false,
+          notes: `Gemini API returned status ${response.status}`,
+          error: errorText
+        };
+      }
+
+      const jsonResponse = await response.json();
+      const candidateText = jsonResponse.candidates?.[0]?.content?.parts?.[0]?.text;
+
+      if (!candidateText) {
+        return {
+          provider: 'gemini',
+          success: false,
+          meterType,
+          detectedValue: null,
+          unit: null,
+          confidence: 0,
+          isReadable: false,
+          notes: 'No response text returned by vision model',
+          error: 'EMPTY_VISION_RESPONSE'
+        };
+      }
+
+      const parsed = JSON.parse(candidateText);
+      return {
+        provider: 'gemini',
+        success: parsed.isReadable && typeof parsed.detectedValue === 'number',
+        meterType,
+        detectedValue: typeof parsed.detectedValue === 'number' ? parsed.detectedValue : null,
+        unit: parsed.unit || (meterType === 'SCALE' ? 'kg' : '%'),
+        confidence: typeof parsed.confidence === 'number' ? parsed.confidence : 0.85,
+        isReadable: Boolean(parsed.isReadable),
+        notes: parsed.notes || 'Successfully analyzed digital meter display.',
+        rawResponse: candidateText
+      };
+    } catch (err: any) {
+      return {
+        provider: 'gemini',
+        success: false,
+        meterType,
+        detectedValue: null,
+        unit: null,
+        confidence: 0,
+        isReadable: false,
+        notes: `Vision API execution error: ${err.message}`,
+        error: err.message
+      };
+    }
+  }
+
+  // Mock / deterministic testing provider (used in offline tests or explicitly configured mock)
+  if (provider === 'mock') {
+    // In mock mode for testing, extract filename hint if present in notes or return standard test reading
+    return {
+      provider: 'mock',
+      success: true,
+      meterType,
+      detectedValue: meterType === 'SCALE' ? 1250.0 : 11.5,
+      unit: meterType === 'SCALE' ? 'kg' : '%',
+      confidence: 0.94,
+      isReadable: true,
+      notes: 'Test mock provider reading calibrated for standard sample.'
+    };
+  }
+
+  // Unconfigured state: Never fabricate! Explicitly explain missing configuration
+  return {
+    provider: 'unconfigured',
+    success: false,
+    meterType,
+    detectedValue: null,
+    unit: null,
+    confidence: 0,
+    isReadable: false,
+    notes: 'No Vision AI API key configured. Manual verification must be performed with audit log entry.',
+    error: 'VISION_PROVIDER_UNCONFIGURED'
+  };
+}
+
+/**
+ * Compares manual reading with AI extracted value against tolerance thresholds
+ */
+export function compareWithManualReading(
+  meterType: 'SCALE' | 'MOISTURE',
+  manualValue: number,
+  aiResult?: VisionAnalysisResult | null,
+  isManualOverride: boolean = false
+): VerificationComparison {
+  const tolerance = meterType === 'SCALE' ? SCALE_TOLERANCE_KG : MOISTURE_TOLERANCE_PCT;
+  const unit = meterType === 'SCALE' ? 'kg' : '%';
+
+  if (!aiResult || !aiResult.success || aiResult.detectedValue === null) {
+    return {
+      manualValue,
+      aiValue: null,
+      difference: null,
+      withinTolerance: isManualOverride,
+      toleranceApplied: tolerance,
+      status: isManualOverride ? 'MANUAL_OVERRIDE' : 'FAILED',
+      message: isManualOverride
+        ? 'Manual verification recorded. AI OCR was unavailable or unreadable.'
+        : `AI vision recognition failed or unconfigured: ${aiResult?.notes || 'No reading obtained'}. Manual override required.`
+    };
+  }
+
+  const diffRaw = Math.abs(manualValue - aiResult.detectedValue);
+  const difference = Math.round(diffRaw * 10) / 10;
+  const withinTolerance = difference <= tolerance;
+
+  if (withinTolerance) {
+    return {
+      manualValue,
+      aiValue: aiResult.detectedValue,
+      difference,
+      withinTolerance: true,
+      toleranceApplied: tolerance,
+      status: 'MATCH',
+      message: `AI value (${aiResult.detectedValue} ${unit}) matches manual entry within allowed tolerance of ±${tolerance} ${unit}.`
+    };
+  }
+
+  if (isManualOverride) {
+    return {
+      manualValue,
+      aiValue: aiResult.detectedValue,
+      difference,
+      withinTolerance: false,
+      toleranceApplied: tolerance,
+      status: 'DIFF_ACCEPTED',
+      message: `Manual override accepted with ${difference} ${unit} discrepancy. Supervisor audit record generated.`
+    };
+  }
+
+  return {
+    manualValue,
+    aiValue: aiResult.detectedValue,
+    difference,
+    withinTolerance: false,
+    toleranceApplied: tolerance,
+    status: 'DIFF_ACCEPTED',
+    message: `Mismatch detected! Manual entry (${manualValue} ${unit}) differs from AI display reading (${aiResult.detectedValue} ${unit}) by ${difference} ${unit} (tolerance: ±${tolerance} ${unit}). Operator review required.`
+  };
+}
+
