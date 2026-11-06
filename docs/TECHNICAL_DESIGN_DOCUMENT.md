@@ -195,3 +195,4 @@ The repository features 44 automated tests across 5 test suites (100% passing):
 1. **Client-Side Hardware Time:** Local device timestamps on offline tablets are subject to device clock drift. The central server stamps `serverReceivedTimestamp` on all records as the official accounting receipt time.
 2. **Commercial Bank Format:** A generic mock NEFT/NACH bulk payment CSV format is provided. Specific commercial banks (e.g. SBI CMP, HDFC Enet) require custom CSV column mapping adapters for production live bank integrations.
 3. **Simulated SMS Gateway:** Simulated Marathi SMS delivery records message logs in the database. Production telecom deployment requires attaching an Indian DLT-approved SMS provider (e.g. Gupshup, ValueFirst, Airtel IQ).
+
