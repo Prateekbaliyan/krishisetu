@@ -5,6 +5,15 @@ import dotenv from 'dotenv';
 
 dotenv.config();
 
+// Production Security Validation: fail fast if JWT_SECRET is missing or insecure
+if (process.env.NODE_ENV === 'production') {
+  const secret = process.env.JWT_SECRET;
+  if (!secret || secret.length < 32 || secret === 'krishisetu-dev-secret-key-32-chars-long') {
+    console.error('FATAL: JWT_SECRET environment variable is missing, insecure, or using dev fallback in production mode.');
+    process.exit(1);
+  }
+}
+
 import authRoutes from './routes/auth.routes';
 import dashboardRoutes from './routes/dashboard.routes';
 import farmerRoutes from './routes/farmer.routes';
@@ -15,6 +24,7 @@ import syncRoutes from './routes/sync.routes';
 import paymentRoutes from './routes/payment.routes';
 import stockRoutes from './routes/stock.routes';
 import auditRoutes from './routes/audit.routes';
+import { authenticateToken } from './middleware/auth';
 
 const app = express();
 const PORT = process.env.PORT || 5000;
@@ -27,9 +37,9 @@ app.use(cors({
 app.use(express.json({ limit: '10mb' }));
 app.use(express.urlencoded({ extended: true, limit: '10mb' }));
 
-// Static route for uploaded scale and moisture photos
+// Static route for uploaded scale and moisture photos (protected with authentication)
 const uploadDir = path.join(process.cwd(), 'uploads');
-app.use('/uploads', express.static(uploadDir));
+app.use('/uploads', authenticateToken, express.static(uploadDir));
 
 // Production health check endpoint
 app.get(['/health', '/api/health'], (req, res) => {
@@ -73,4 +83,3 @@ if (process.env.NODE_ENV !== 'test') {
 }
 
 export default app;
-

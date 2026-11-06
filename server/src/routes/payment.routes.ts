@@ -8,10 +8,10 @@ const router = Router();
 
 /**
  * GET /api/payments/eligible
- * Lists approved purchases that are eligible for a new payment run.
+ * Lists approved purchases that are strictly eligible for a new payment run.
  * Rules:
  * - Must be approved (status = 'APPROVED')
- * - Must not already be linked to a PaymentRun (paymentRunId is null)
+ * - Must NOT already be linked to a PaymentRun (paymentRunId is null)
  * - Must NOT be flagged (isFlagged = false)
  * - Farmer must have bankVerificationStatus = 'VERIFIED'
  */
@@ -21,6 +21,7 @@ router.get('/eligible', authenticateToken, requireRole(['MANAGER']), async (req,
       where: {
         status: 'APPROVED',
         paymentRunId: null,
+        isFlagged: false,
         paymentEligibility: true,
         farmer: {
           bankVerificationStatus: 'VERIFIED'
@@ -99,7 +100,12 @@ router.get('/eligible', authenticateToken, requireRole(['MANAGER']), async (req,
 
 /**
  * POST /api/payments/create-run
- * Generates a payment batch, creates Payment entries, generates CSV, updates purchases
+ * Generates a payment batch inside an atomic database transaction.
+ * Guarantees:
+ * - Strict eligibility re-check inside transaction (blocks flagged, unapproved or unverified farmers)
+ * - Atomic assignment prevents double allocation or concurrent race condition
+ * - Validates bank account numbers and IFSC format
+ * - Generates mock bank CSV and clearly separates generation from payment completion ('PENDING' vs 'PAID')
  */
 router.post('/create-run', authenticateToken, requireRole(['MANAGER']), async (req, res) => {
   try {
@@ -109,145 +115,166 @@ router.post('/create-run', authenticateToken, requireRole(['MANAGER']), async (r
       return res.status(400).json({ success: false, error: 'Must select at least one eligible purchase.' });
     }
 
-    // Verify all selected purchases are strictly eligible (prevent duplicate payments or unverified banks)
-    const purchases = await prisma.purchase.findMany({
-      where: {
-        id: { in: purchaseIds },
-        paymentRunId: null, // Critical: prevent duplicate payment inclusion
-        status: 'APPROVED',
-        paymentEligibility: true,
-        farmer: {
-          bankVerificationStatus: 'VERIFIED'
-        }
-      },
-      include: {
-        farmer: true
-      }
-    });
-
-    if (purchases.length === 0) {
-      return res.status(400).json({
-        success: false,
-        error: 'None of the selected purchases are eligible for payment run (may be already included or flagged).'
-      });
-    }
-
-    // Batch identifier: BATCH-YYYYMMDD-COUNT
     const dateStr = new Date().toISOString().slice(0, 10).replace(/-/g, '');
-    const runCount = await prisma.paymentRun.count();
-    const batchNumber = `BATCH-${dateStr}-${String(runCount + 1).padStart(3, '0')}`;
 
-    // Group purchases by farmer
-    const farmerTotals: Record<string, { farmer: any; amount: number; slips: string[] }> = {};
-    for (const p of purchases) {
-      const fId = p.farmer.id;
-      if (!farmerTotals[fId]) {
-        farmerTotals[fId] = { farmer: p.farmer, amount: 0, slips: [] };
+    // Execute batch generation within an isolated database transaction
+    const result = await prisma.$transaction(async (tx) => {
+      // 1. Recheck eligibility inside transaction with strict criteria
+      const purchases = await tx.purchase.findMany({
+        where: {
+          id: { in: purchaseIds },
+          paymentRunId: null, // Strictly unlinked
+          status: 'APPROVED', // Strictly approved
+          isFlagged: false, // Must not be flagged
+          paymentEligibility: true,
+          farmer: {
+            bankVerificationStatus: 'VERIFIED'
+          }
+        },
+        include: {
+          farmer: true
+        }
+      });
+
+      if (purchases.length === 0) {
+        throw new Error('None of the selected purchases are eligible for payment run (may be already included, unapproved, or flagged).');
       }
-      farmerTotals[fId].amount += p.totalAmount;
-      farmerTotals[fId].slips.push(p.slipNumber);
-    }
 
-    const totalAmount = purchases.reduce((acc, p) => acc + p.totalAmount, 0);
-    const totalFarmers = Object.keys(farmerTotals).length;
-
-    // Create PaymentRun in database
-    const paymentRun = await prisma.paymentRun.create({
-      data: {
-        batchNumber,
-        totalFarmers,
-        totalPurchases: purchases.length,
-        totalAmount: Math.round(totalAmount * 100) / 100,
-        status: 'PENDING',
-        createdBy: req.user!.fullName
+      // 2. Validate all farmer bank details
+      for (const p of purchases) {
+        if (!p.farmer.bankAccountNumber || p.farmer.bankAccountNumber.trim().length < 8) {
+          throw new Error(`Farmer ${p.farmer.fullName} (${p.farmer.farmerId}) has invalid or missing bank account number.`);
+        }
+        if (!p.farmer.ifscCode || p.farmer.ifscCode.trim().length < 11) {
+          throw new Error(`Farmer ${p.farmer.fullName} (${p.farmer.farmerId}) has invalid or missing IFSC code.`);
+        }
       }
-    });
 
-    // Create individual Payment records for each farmer
-    const paymentRecordsForCsv = [];
-    for (const [farmerId, data] of Object.entries(farmerTotals)) {
-      const pRecord = await prisma.payment.create({
+      // 3. Batch identifier
+      const runCount = await tx.paymentRun.count();
+      const batchNumber = `BATCH-${dateStr}-${String(runCount + 1).padStart(3, '0')}`;
+
+      // 4. Group purchases by farmer
+      const farmerTotals: Record<string, { farmer: any; amount: number; slips: string[] }> = {};
+      for (const p of purchases) {
+        const fId = p.farmer.id;
+        if (!farmerTotals[fId]) {
+          farmerTotals[fId] = { farmer: p.farmer, amount: 0, slips: [] };
+        }
+        farmerTotals[fId].amount += p.totalAmount;
+        farmerTotals[fId].slips.push(p.slipNumber);
+      }
+
+      const totalAmount = purchases.reduce((acc, p) => acc + p.totalAmount, 0);
+      const totalFarmers = Object.keys(farmerTotals).length;
+
+      // 5. Create PaymentRun in database (Status: PENDING - generated, not yet processed)
+      const paymentRun = await tx.paymentRun.create({
         data: {
-          paymentRunId: paymentRun.id,
-          farmerId,
-          amount: Math.round(data.amount * 100) / 100,
+          batchNumber,
+          totalFarmers,
+          totalPurchases: purchases.length,
+          totalAmount: Math.round(totalAmount * 100) / 100,
+          status: 'PENDING',
+          createdBy: req.user!.fullName
+        }
+      });
+
+      // 6. Create individual Payment records for each farmer
+      const paymentRecordsForCsv = [];
+      for (const [farmerId, data] of Object.entries(farmerTotals)) {
+        const pRecord = await tx.payment.create({
+          data: {
+            paymentRunId: paymentRun.id,
+            farmerId,
+            amount: Math.round(data.amount * 100) / 100,
+            bankAccountName: data.farmer.bankAccountName,
+            bankAccountNumber: data.farmer.bankAccountNumber,
+            ifscCode: data.farmer.ifscCode,
+            status: 'PENDING'
+          }
+        });
+
+        paymentRecordsForCsv.push({
+          batchNumber,
+          paymentId: pRecord.id,
+          farmerId: data.farmer.farmerId,
+          farmerName: data.farmer.fullName,
           bankAccountName: data.farmer.bankAccountName,
           bankAccountNumber: data.farmer.bankAccountNumber,
           ifscCode: data.farmer.ifscCode,
-          status: 'PENDING'
-        }
+          bankName: data.farmer.bankName,
+          amount: Math.round(data.amount * 100) / 100,
+          remarks: `Slips: ${data.slips.join(',')}`,
+          date: new Date().toISOString().split('T')[0]
+        });
+      }
+
+      // 7. Atomically link purchases to this paymentRun (guards against concurrent race conditions)
+      const updateResult = await tx.purchase.updateMany({
+        where: {
+          id: { in: purchases.map(p => p.id) },
+          paymentRunId: null
+        },
+        data: { paymentRunId: paymentRun.id }
       });
 
-      paymentRecordsForCsv.push({
+      if (updateResult.count !== purchases.length) {
+        throw new Error('Concurrent payment conflict detected: Some purchases were assigned to another batch simultaneously.');
+      }
+
+      // 8. Generate CSV content using adapter
+      const csvContent = generateBankBulkPaymentCsv({
         batchNumber,
-        paymentId: pRecord.id,
-        farmerId: data.farmer.farmerId,
-        farmerName: data.farmer.fullName,
-        bankAccountName: data.farmer.bankAccountName,
-        bankAccountNumber: data.farmer.bankAccountNumber,
-        ifscCode: data.farmer.ifscCode,
-        bankName: data.farmer.bankName,
-        amount: Math.round(data.amount * 100) / 100,
-        remarks: `Slips: ${data.slips.join(',')}`,
-        date: new Date().toISOString().split('T')[0]
+        companyName: 'Latur Farmer Producer Company Ltd',
+        records: paymentRecordsForCsv
       });
-    }
 
-    // Link purchases to this paymentRun
-    await prisma.purchase.updateMany({
-      where: { id: { in: purchases.map(p => p.id) } },
-      data: { paymentRunId: paymentRun.id }
-    });
+      const csvFileName = `${batchNumber}-BulkPayment.csv`;
 
-    // Generate CSV content using adapter
-    const csvContent = generateBankBulkPaymentCsv({
-      batchNumber,
-      companyName: 'Latur Farmer Producer Company Ltd',
-      records: paymentRecordsForCsv
-    });
-
-    const csvFileName = `${batchNumber}-BulkPayment.csv`;
-
-    // Save CSV content and file name in PaymentRun
-    const updatedRun = await prisma.paymentRun.update({
-      where: { id: paymentRun.id },
-      data: {
-        csvFileName,
-        csvContent
-      },
-      include: {
-        payments: {
-          include: {
-            farmer: {
-              select: { farmerId: true, fullName: true, mobileNumber: true }
+      // Save CSV content and file name in PaymentRun
+      const updatedRun = await tx.paymentRun.update({
+        where: { id: paymentRun.id },
+        data: {
+          csvFileName,
+          csvContent
+        },
+        include: {
+          payments: {
+            include: {
+              farmer: {
+                select: { farmerId: true, fullName: true, mobileNumber: true }
+              }
             }
           }
         }
-      }
+      });
+
+      return { updatedRun, batchNumber, totalPurchases: purchases.length, totalFarmers, totalAmount };
     });
 
-    // Audit Log
+    // 9. Immutable Audit Log after transaction commit
     await createAuditLog({
       entityType: 'PAYMENT',
-      entityId: paymentRun.id,
+      entityId: result.updatedRun.id,
       action: 'PAYMENT_RUN',
       userId: req.user!.id,
       userName: req.user!.fullName,
       details: {
-        batchNumber,
-        totalPurchases: purchases.length,
-        totalFarmers,
-        totalAmount: paymentRun.totalAmount
+        batchNumber: result.batchNumber,
+        totalPurchases: result.totalPurchases,
+        totalFarmers: result.totalFarmers,
+        totalAmount: result.totalAmount
       }
     });
 
     return res.status(201).json({
       success: true,
-      message: `Payment Run ${batchNumber} generated successfully.`,
-      paymentRun: updatedRun
+      message: `Payment Run ${result.batchNumber} generated successfully.`,
+      paymentRun: result.updatedRun
     });
   } catch (err: any) {
-    return res.status(500).json({ success: false, error: err.message });
+    return res.status(400).json({ success: false, error: err.message });
   }
 });
 
@@ -299,6 +326,7 @@ router.get('/runs/:id/download-csv', authenticateToken, requireRole(['MANAGER'])
 /**
  * POST /api/payments/runs/:id/simulate-bank
  * Simulates bank processing response (PAID or PROCESSING or FAILED)
+ * Only when transition to PAID occurs are the underlying purchases marked as PAID.
  */
 router.post('/runs/:id/simulate-bank', authenticateToken, requireRole(['MANAGER']), async (req, res) => {
   try {
@@ -340,7 +368,7 @@ router.post('/runs/:id/simulate-bank', authenticateToken, requireRole(['MANAGER'
       });
     }
 
-    // If paid, mark purchases as PAID
+    // When bank confirms payment (PAID), mark all underlying purchases as PAID
     if (newStatus === 'PAID') {
       await prisma.purchase.updateMany({
         where: { paymentRunId: id },

@@ -43,14 +43,15 @@ This guide provides deployment instructions for running KrishiSetu across **Verc
    - **Build Command:** `npm install && npm run build && npx prisma db push --schema=prisma/schema.postgresql.prisma`
    - **Start Command:** `npm start`
    - **Health Check Path:** `/api/health`
-4. Set Environment Variables:
-   - `NODE_ENV`: `production`
+4. Set Environment Variables in Render Dashboard (**Environment > Add Environment Variable**):
+   - `NODE_ENV`: `production` (Server will validate production security on startup)
    - `PORT`: `5000`
-   - `DATABASE_URL`: Your Supabase connection string
-   - `JWT_SECRET`: A secure 32+ character secret string
+   - `DATABASE_URL`: Your Supabase connection string (`postgresql://postgres:...`)
+   - `JWT_SECRET`: A cryptographically secure secret (minimum 32 characters; server will refuse to start if missing, short, or using the default dev string)
    - `CLIENT_URL`: Your frontend Vercel domain (e.g. `https://krishisetu.vercel.app`)
-   - `GEMINI_API_KEY`: Your Google AI Studio API key (optional for vision OCR)
-   - `VISION_PROVIDER`: `gemini` (or `mock` for testing)
+   - `GEMINI_API_KEY`: Your Google Gemini API key obtained from [Google AI Studio](https://aistudio.google.com/). Configured exclusively on the backend; never exposed to frontend code or committed to GitHub.
+   - `VISION_PROVIDER`: `gemini` (defaults to `gemini` when `GEMINI_API_KEY` is present; fallback to `mock` or `unconfigured` if key is not configured)
+   - `GEMINI_TIMEOUT_MS`: `15000` (15-second abort timeout prevents hanging during network latency)
 
 ---
 
@@ -83,15 +84,15 @@ npm --prefix client install
 npm run db:push
 npm run db:seed
 
-# 3. Run automated test suites (all 30 tests)
+# 3. Run automated test suites (all 44 tests: 40 backend, 4 frontend)
 npm test
 
 # 4. Start local development servers
-# Terminal 1: Backend API (port 5000)
-npm run dev:server
-
-# Terminal 2: Frontend Client (port 5173)
-npm run dev:client
+# On Windows, you can double-click `start.bat` or run:
+npm run dev
+# Or individually:
+# Terminal 1: Backend API (port 5000) -> npm run dev:server
+# Terminal 2: Frontend Client (port 5173) -> npm run dev:client
 ```
 
 Open your browser at `http://localhost:5173`.

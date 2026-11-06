@@ -1,6 +1,6 @@
 # KrishiSetu – Farmer Procurement & Payment Management System
 
-[![Build & Test](https://img.shields.io/badge/tests-30%20passed-success?style=flat-square)](.)
+[![Build & Test](https://img.shields.io/badge/tests-44%20passed-success?style=flat-square)](.)
 [![TypeScript](https://img.shields.io/badge/TypeScript-5.7-blue?style=flat-square&logo=typescript)](.)
 [![React](https://img.shields.io/badge/React-18.3-61dafb?style=flat-square&logo=react)](.)
 [![Node](https://img.shields.io/badge/Node.js-22%2B-green?style=flat-square&logo=nodedotjs)](.)
@@ -160,13 +160,24 @@ npm run test:client
 npm test
 ```
 
-### Test Coverage Highlights
+### Test Coverage Highlights (44 Passing Automated Tests)
 - ✅ **Calculations:** Moisture deduction thresholds, decimal-safe net weight & amount arithmetic, invalid weight rejection (Gross $\le$ Tare, negative tare, excessive moisture).
-- ✅ **Offline Batch Sync:** Idempotency verification, conflict handling, server formula recalculation, duplicate sync rejection.
-- ✅ **Security & RBAC:** Role enforcement (operators blocked from publishing prices or payment runs), unauthenticated request rejection.
-- ✅ **Payment Management:** Verified bank account validation, flagged lot exclusion, duplicate payment run inclusion rejection, generic mock bulk-payment CSV generation.
-- ✅ **Anomaly Detection:** Land area benchmark violations, 60-minute duplicate purchase detection, uniform moisture streak detection.
-- ✅ **Cryptographic Audit:** Full SHA-256 hash chain verification across all sequential transactions.
+- ✅ **AI Mismatch Backend Enforcement:** Independent backend comparison against scale ($\pm 2.0\text{ kg}$) and moisture ($\pm 0.5\%$) tolerances; blocks operator bypass; requires authorized Manager approval with review reason and reviewer ID.
+- ✅ **Daily Price Validation:** Backend-only rate enforcement strictly looks up central published daily rates; completely ignores client-supplied rates; rejects unpublished/invalid crops.
+- ✅ **Offline Batch Sync:** Idempotency verification via UUID keys, conflict handling, server formula recalculation, duplicate sync rejection.
+- ✅ **Security, RBAC & Centre Boundaries:** Operator restricted to assigned collection centre (blocked from other centre slips, purchases, and dispatches); production JWT secret validation.
+- ✅ **Payment Run Safety & Atomicity:** Database transactions prevent race conditions; excludes flagged or unapproved purchases; verifies bank details before CSV generation; prevents duplicate payment assignments.
+- ✅ **Deep Image Upload Security:** Binary magic-byte inspection rejects fake image extensions; path traversal prevention with UUID filenames; protected `/uploads` static route.
+- ✅ **Cryptographic Audit:** Full SHA-256 hash chain verification across all sequential transactions with documented physical device limitations.
+
+---
+
+## 📚 Technical Documentation & Deployment Guides
+
+- 📘 [Technical Design Document (TDD)](./docs/TECHNICAL_DESIGN_DOCUMENT.md) — Detailed architecture, subsystem designs, mathematical formulas, and limitation analysis.
+- 🚀 [Production Deployment Guide](./docs/DEPLOYMENT.md) — Render, Vercel, Supabase PostgreSQL, environment variables, and Gemini API setup.
+- 📡 [API Documentation](./docs/API_DOCUMENTATION.md) — Complete REST endpoint specifications, request/response schemas, and error codes.
+- 🏗️ [System Architecture & Specifications](./docs/ARCHITECTURE.md) — Data flow diagrams, offline-first sync lifecycle, and security model.
 
 ---
 

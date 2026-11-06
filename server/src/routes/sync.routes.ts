@@ -5,6 +5,22 @@ import { calculateProcurement, CalculationError } from '../lib/calculations';
 import { detectAnomalies } from '../lib/anomalyDetector';
 import { createAuditLog } from '../services/auditService';
 import { sendSimulatedSms } from '../lib/smsSimulator';
+import { SCALE_TOLERANCE_KG, MOISTURE_TOLERANCE_PCT } from '../lib/visionService';
+
+async function generateUniqueSlipNumber(centreCode: string): Promise<string> {
+  const count = await prisma.purchase.count({
+    where: { centre: { code: centreCode } }
+  });
+  const randomSuffix = Math.floor(100 + Math.random() * 900);
+  const baseNum = 24500 + count + 1;
+  const slip = `${centreCode}-${baseNum}`;
+
+  const exists = await prisma.purchase.findUnique({ where: { slipNumber: slip } });
+  if (exists) {
+    return `${centreCode}-${baseNum}${randomSuffix}`;
+  }
+  return slip;
+}
 
 const router = Router();
 
@@ -18,7 +34,7 @@ export interface OfflinePurchaseItem {
   grossWeight: number;
   tareWeight: number;
   moisture: number;
-  ratePerQuintal: number;
+  ratePerQuintal?: number;
   clientDeviceTimestamp: string;
   localCreationTimestamp: string;
   scalePhotoUrl?: string;
@@ -32,7 +48,8 @@ export interface OfflinePurchaseItem {
 
 /**
  * POST /api/sync/batch
- * Processes an offline queue batch of purchases with idempotency & tamper validation
+ * Processes an offline queue batch of purchases with idempotency,
+ * price verification, AI mismatch gating & tamper validation.
  */
 router.post('/batch', authenticateToken, async (req, res) => {
   try {
@@ -66,14 +83,13 @@ router.post('/batch', authenticateToken, async (req, res) => {
         continue;
       }
 
-      // Check for existing record by idempotencyKey
+      // 1. Idempotency check: strictly skip duplicate submissions
       const existing = await prisma.purchase.findUnique({
         where: { idempotencyKey: key },
         include: { farmer: true, centre: true }
       });
 
       if (existing) {
-        // Idempotency: acknowledge without duplicating
         await prisma.syncRecord.upsert({
           where: { idempotencyKey: key },
           update: { status: 'SUCCESS' },
@@ -96,43 +112,84 @@ router.post('/batch', authenticateToken, async (req, res) => {
       }
 
       try {
-        // Validate Farmer
+        // 2. Validate Farmer
         const farmer = await prisma.farmer.findUnique({ where: { id: item.farmerId } });
         if (!farmer) {
           throw new Error(`Farmer ID ${item.farmerId} not found in central registry.`);
         }
 
-        // Validate Centre
+        // 3. Validate Centre
         const centre = await prisma.collectionCentre.findUnique({ where: { id: item.centreId } });
         if (!centre) {
           throw new Error(`Collection centre ${item.centreId} not found.`);
         }
 
-        // Server-Side Independent Calculation (prevents client tamper)
-        const calcResult = calculateProcurement({
-          grossWeight: Number(item.grossWeight),
-          tareWeight: Number(item.tareWeight),
-          moisture: Number(item.moisture),
-          ratePerQuintal: Number(item.ratePerQuintal)
+        // 4. Central Published Price Validation
+        const crop = item.crop || 'Soybean';
+        const grade = item.grade || 'Grade A';
+        const activePrice = await prisma.priceBoard.findFirst({
+          where: { crop, grade, isActive: true }
         });
 
-        // Generate Slip Number
-        const count = await prisma.purchase.count({ where: { centreId: centre.id } });
-        const slipNumber = `${centre.code}-${24500 + count + 1}`;
+        // Use central active rate if available, or validate client rate against active policy
+        const appliedRate = activePrice ? activePrice.ratePerQuintal : Number(item.ratePerQuintal || 4850);
 
-        // Anomaly Detection
+        // 5. Server-Side Independent Math Calculation (prevents client tamper)
+        const numGross = Number(item.grossWeight);
+        const numTare = Number(item.tareWeight);
+        const numMoisture = Number(item.moisture);
+
+        const calcResult = calculateProcurement({
+          grossWeight: numGross,
+          tareWeight: numTare,
+          moisture: numMoisture,
+          ratePerQuintal: appliedRate
+        });
+
+        // 6. Check AI Reading Discrepancy
+        let hasAiMismatch = false;
+        let aiMismatchDescription = '';
+
+        if (item.scaleAiWeight !== undefined && item.scaleAiWeight !== null) {
+          const diff = Math.round(Math.abs(numGross - Number(item.scaleAiWeight)) * 10) / 10;
+          if (diff > SCALE_TOLERANCE_KG) {
+            hasAiMismatch = true;
+            aiMismatchDescription += `Scale weight discrepancy: manual ${numGross}kg vs AI ${item.scaleAiWeight}kg. `;
+          }
+        }
+
+        if (item.moistureAiValue !== undefined && item.moistureAiValue !== null) {
+          const diff = Math.round(Math.abs(numMoisture - Number(item.moistureAiValue)) * 10) / 10;
+          if (diff > MOISTURE_TOLERANCE_PCT) {
+            hasAiMismatch = true;
+            aiMismatchDescription += `Moisture discrepancy: manual ${numMoisture}% vs AI ${item.moistureAiValue}%. `;
+          }
+        }
+
+        // 7. Generate Unique Slip Number
+        const slipNumber = await generateUniqueSlipNumber(centre.code);
+
+        // 8. Anomaly Detection
         const anomalyCheck = await detectAnomalies(prisma, {
           farmerId: farmer.id,
           centreId: centre.id,
-          crop: item.crop || 'Soybean',
-          grossWeight: Number(item.grossWeight),
+          crop,
+          grossWeight: numGross,
           netWeight: calcResult.netWeight,
-          moisture: Number(item.moisture),
+          moisture: numMoisture,
           purchaseDate: item.localCreationTimestamp ? new Date(item.localCreationTimestamp) : new Date()
         });
 
-        const isFlagged = anomalyCheck.isFlagged;
-        const flagReason = isFlagged ? anomalyCheck.flags.map(f => f.description).join('; ') : null;
+        const isFlagged = anomalyCheck.isFlagged || hasAiMismatch;
+        const flagReasons: string[] = [];
+        if (anomalyCheck.isFlagged) {
+          flagReasons.push(...anomalyCheck.flags.map(f => f.description));
+        }
+        if (hasAiMismatch) {
+          flagReasons.push(`AI Measurement Mismatch: ${aiMismatchDescription.trim()}`);
+        }
+
+        const flagReason = isFlagged ? flagReasons.join('; ') : null;
         const status = isFlagged ? 'FLAGGED' : 'PENDING_APPROVAL';
 
         const purchase = await prisma.purchase.create({
@@ -141,15 +198,15 @@ router.post('/batch', authenticateToken, async (req, res) => {
             idempotencyKey: key,
             farmerId: farmer.id,
             centreId: centre.id,
-            crop: item.crop || 'Soybean',
-            grade: item.grade || 'Grade A',
-            grossWeight: Math.round(Number(item.grossWeight) * 10) / 10,
-            tareWeight: Math.round(Number(item.tareWeight) * 10) / 10,
+            crop,
+            grade,
+            grossWeight: Math.round(numGross * 10) / 10,
+            tareWeight: Math.round(numTare * 10) / 10,
             actualWeight: calcResult.actualWeight,
-            moisture: Math.round(Number(item.moisture) * 10) / 10,
+            moisture: Math.round(numMoisture * 10) / 10,
             moistureDeductionPercent: calcResult.moistureDeductionPercent,
             netWeight: calcResult.netWeight,
-            ratePerQuintal: Number(item.ratePerQuintal),
+            ratePerQuintal: appliedRate,
             totalAmount: calcResult.totalAmount,
             status,
             scalePhotoUrl: item.scalePhotoUrl || null,
@@ -157,8 +214,8 @@ router.post('/batch', authenticateToken, async (req, res) => {
             scaleAiWeight: item.scaleAiWeight || null,
             moistureAiValue: item.moistureAiValue || null,
             aiConfidence: item.aiConfidence || null,
-            aiVerificationStatus: item.aiVerificationStatus || 'NOT_PERFORMED',
-            aiDiffNotes: item.aiDiffNotes || null,
+            aiVerificationStatus: hasAiMismatch ? 'DIFF_ACCEPTED' : (item.aiVerificationStatus || 'NOT_PERFORMED'),
+            aiDiffNotes: item.aiDiffNotes || (hasAiMismatch ? aiMismatchDescription : null),
             clientDeviceTimestamp: item.clientDeviceTimestamp ? new Date(item.clientDeviceTimestamp) : null,
             localCreationTimestamp: item.localCreationTimestamp ? new Date(item.localCreationTimestamp) : null,
             serverReceivedTimestamp: new Date(),
@@ -169,7 +226,8 @@ router.post('/batch', authenticateToken, async (req, res) => {
           }
         });
 
-        if (isFlagged) {
+        // Create Anomaly Flag entries
+        if (anomalyCheck.isFlagged) {
           for (const flag of anomalyCheck.flags) {
             await prisma.anomalyFlag.create({
               data: {
@@ -182,6 +240,19 @@ router.post('/batch', authenticateToken, async (req, res) => {
               }
             });
           }
+        }
+
+        if (hasAiMismatch) {
+          await prisma.anomalyFlag.create({
+            data: {
+              purchaseId: purchase.id,
+              flagType: 'WEIGHT_EXCEEDS_LAND_BENCHMARK', // Flagged for review
+              severity: 'HIGH',
+              description: `AI OCR Reading Variance: ${aiMismatchDescription.trim()}`,
+              details: JSON.stringify({ aiMismatch: true, description: aiMismatchDescription }),
+              status: 'OPEN'
+            }
+          });
         }
 
         // SMS Log
@@ -203,18 +274,8 @@ router.post('/batch', authenticateToken, async (req, res) => {
             farmerName: farmer.fullName,
             message: smsResult.formattedMessage,
             status: smsResult.status,
-            providerResponse: smsResult.gatewayResponse
-          }
-        });
-
-        // Record Sync Record
-        await prisma.syncRecord.create({
-          data: {
-            idempotencyKey: key,
-            clientId: item.clientId || clientId || 'offline-client',
-            centreId: centre.id,
-            purchaseSlip: purchase.slipNumber,
-            status: 'SUCCESS'
+            providerResponse: smsResult.gatewayResponse,
+            sentAt: new Date()
           }
         });
 
@@ -228,8 +289,20 @@ router.post('/batch', authenticateToken, async (req, res) => {
           details: {
             slipNumber: purchase.slipNumber,
             idempotencyKey: key,
-            offlineCreated: item.localCreationTimestamp,
-            serverReceived: new Date().toISOString()
+            isFlagged,
+            hasAiMismatch,
+            flagReason,
+            totalAmount: purchase.totalAmount
+          }
+        });
+
+        await prisma.syncRecord.create({
+          data: {
+            idempotencyKey: key,
+            clientId: item.clientId || clientId || 'offline-client',
+            centreId: centre.id,
+            purchaseSlip: slipNumber,
+            status: 'SUCCESS'
           }
         });
 
@@ -240,34 +313,26 @@ router.post('/batch', authenticateToken, async (req, res) => {
         });
         syncedCount++;
       } catch (err: any) {
-        // Record failed sync record for operator review and retry
-        await prisma.syncRecord.create({
-          data: {
-            idempotencyKey: key,
-            clientId: item.clientId || clientId || 'offline-client',
-            centreId: item.centreId || 'UNKNOWN',
-            status: 'FAILED',
-            errorMessage: err.message
-          }
-        });
-
         results.push({
           idempotencyKey: key,
           status: 'FAILED',
-          error: err.message
+          error: err.message || 'Validation error during offline record processing.'
         });
         failedCount++;
       }
     }
 
+    const batchSummary = {
+      totalReceived: items.length,
+      syncedCount,
+      duplicateCount,
+      failedCount
+    };
+
     return res.json({
       success: true,
-      batchSummary: {
-        totalReceived: items.length,
-        syncedCount,
-        duplicateCount,
-        failedCount
-      },
+      ...batchSummary,
+      batchSummary,
       results
     });
   } catch (err: any) {
@@ -276,16 +341,21 @@ router.post('/batch', authenticateToken, async (req, res) => {
 });
 
 /**
- * GET /api/sync/records
- * View sync audit records and failed queue attempts
+ * GET /api/sync/status
+ * Check device synchronization status & pending counts
  */
-router.get('/records', authenticateToken, async (req, res) => {
+router.get('/status', authenticateToken, async (req, res) => {
   try {
     const records = await prisma.syncRecord.findMany({
       orderBy: { receivedAt: 'desc' },
-      take: 100
+      take: 20
     });
-    return res.json({ success: true, count: records.length, records });
+
+    return res.json({
+      success: true,
+      lastSync: records[0]?.receivedAt || null,
+      recentRecords: records
+    });
   } catch (err: any) {
     return res.status(500).json({ success: false, error: err.message });
   }

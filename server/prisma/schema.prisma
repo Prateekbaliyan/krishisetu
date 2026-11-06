@@ -116,6 +116,8 @@ model Purchase {
   paymentRun              PaymentRun?       @relation(fields: [paymentRunId], references: [id])
   isFlagged               Boolean           @default(false)
   flagReason              String?
+  reviewerId              String?
+  reviewDecision          String?           // "APPROVE" | "REJECT"
   reviewedBy              String?
   reviewedAt              DateTime?
   reviewNotes             String?

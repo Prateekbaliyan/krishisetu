@@ -24,12 +24,12 @@ export interface VerificationComparison {
   message: string;
 }
 
-const SCALE_TOLERANCE_KG = 2.0;       // Max allowable difference without warning
-const MOISTURE_TOLERANCE_PCT = 0.5;   // Max allowable moisture diff without warning
+export const SCALE_TOLERANCE_KG = 2.0;       // Max allowable difference in kg
+export const MOISTURE_TOLERANCE_PCT = 0.5;   // Max allowable moisture diff in %
 
 /**
- * Analyzes scale or moisture meter image using Gemini Vision API if key is configured,
- * or safely reports unconfigured provider / mock provider with strict non-fabrication.
+ * Analyzes scale or moisture meter image using Gemini Vision API with robust error handling,
+ * timeouts, rate limit guards, confidence scoring, and strict non-fabrication.
  */
 export async function analyzeMeterImage(
   imageBuffer: Buffer,
@@ -39,8 +39,24 @@ export async function analyzeMeterImage(
   const apiKey = process.env.GEMINI_API_KEY;
   const provider = process.env.VISION_PROVIDER || (apiKey ? 'gemini' : 'unconfigured');
 
+  // Validate image buffer presence
+  if (!imageBuffer || imageBuffer.length < 16) {
+    return {
+      provider: provider === 'mock' ? 'mock' : 'unconfigured',
+      success: false,
+      meterType,
+      detectedValue: null,
+      unit: null,
+      confidence: 0,
+      isReadable: false,
+      notes: 'No valid image data provided for meter reading analysis.',
+      error: 'INVALID_IMAGE_DATA'
+    };
+  }
+
+  // Gemini Vision execution path
   if (provider === 'gemini') {
-    if (!apiKey) {
+    if (!apiKey || apiKey.trim() === '' || apiKey.includes('your-gemini-api-key')) {
       return {
         provider: 'unconfigured',
         success: false,
@@ -49,10 +65,14 @@ export async function analyzeMeterImage(
         unit: null,
         confidence: 0,
         isReadable: false,
-        notes: 'GEMINI_API_KEY is not configured in environment variables. Vision analysis cannot be performed.',
+        notes: 'GEMINI_API_KEY is not configured in backend environment variables. Vision analysis cannot be performed automatically. Manual verification required.',
         error: 'API_KEY_MISSING'
       };
     }
+
+    const controller = new AbortController();
+    const timeoutMs = Number(process.env.GEMINI_TIMEOUT_MS) || 15000;
+    const timeoutId = setTimeout(() => controller.abort(), timeoutMs);
 
     try {
       const base64Data = imageBuffer.toString('base64');
@@ -92,8 +112,9 @@ Return strictly a JSON object with this exact schema:
   "notes": "string"
 }`;
 
-      // Call Gemini 1.5 Flash API directly using fetch
-      const endpoint = `https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-flash:generateContent?key=${apiKey}`;
+      const modelName = process.env.GEMINI_MODEL || 'gemini-1.5-flash';
+      const endpoint = `https://generativelanguage.googleapis.com/v1beta/models/${modelName}:generateContent?key=${apiKey}`;
+
       const requestBody = {
         contents: [
           {
@@ -117,11 +138,40 @@ Return strictly a JSON object with this exact schema:
       const response = await fetch(endpoint, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify(requestBody)
+        body: JSON.stringify(requestBody),
+        signal: controller.signal
       });
+
+      clearTimeout(timeoutId);
 
       if (!response.ok) {
         const errorText = await response.text();
+        if (response.status === 429) {
+          return {
+            provider: 'gemini',
+            success: false,
+            meterType,
+            detectedValue: null,
+            unit: null,
+            confidence: 0,
+            isReadable: false,
+            notes: 'Gemini Vision API quota / rate limit exceeded. Please try again shortly or use manual override.',
+            error: 'RATE_LIMIT_EXCEEDED'
+          };
+        }
+        if (response.status === 400 || response.status === 403) {
+          return {
+            provider: 'gemini',
+            success: false,
+            meterType,
+            detectedValue: null,
+            unit: null,
+            confidence: 0,
+            isReadable: false,
+            notes: `Gemini API authentication or configuration error (HTTP ${response.status}).`,
+            error: 'API_AUTH_ERROR'
+          };
+        }
         return {
           provider: 'gemini',
           success: false,
@@ -130,13 +180,13 @@ Return strictly a JSON object with this exact schema:
           unit: null,
           confidence: 0,
           isReadable: false,
-          notes: `Gemini API returned status ${response.status}`,
+          notes: `Gemini Vision service temporarily unavailable (status ${response.status}). Manual verification required.`,
           error: errorText
         };
       }
 
       const jsonResponse = await response.json();
-      const candidateText = jsonResponse.candidates?.[0]?.content?.parts?.[0]?.text;
+      let candidateText = jsonResponse.candidates?.[0]?.content?.parts?.[0]?.text;
 
       if (!candidateText) {
         return {
@@ -147,24 +197,95 @@ Return strictly a JSON object with this exact schema:
           unit: null,
           confidence: 0,
           isReadable: false,
-          notes: 'No response text returned by vision model',
+          notes: 'No response text returned by vision model. Digits may be unreadable.',
           error: 'EMPTY_VISION_RESPONSE'
         };
       }
 
-      const parsed = JSON.parse(candidateText);
+      // Strip markdown backticks if returned
+      const jsonMatch = candidateText.match(/```(?:json)?\s*([\s\S]*?)\s*```/);
+      if (jsonMatch) {
+        candidateText = jsonMatch[1];
+      }
+
+      let parsed: any;
+      try {
+        parsed = JSON.parse(candidateText.trim());
+      } catch (e) {
+        return {
+          provider: 'gemini',
+          success: false,
+          meterType,
+          detectedValue: null,
+          unit: null,
+          confidence: 0,
+          isReadable: false,
+          notes: 'Could not parse structured reading from Gemini vision output.',
+          rawResponse: candidateText,
+          error: 'PARSE_ERROR'
+        };
+      }
+
+      const detected = typeof parsed.detectedValue === 'number' ? parsed.detectedValue : null;
+      const confidence = typeof parsed.confidence === 'number' ? parsed.confidence : 0.85;
+      const isReadable = Boolean(parsed.isReadable) && confidence >= 0.50 && detected !== null;
+
+      // Validate logical ranges
+      if (detected !== null) {
+        if (meterType === 'SCALE' && (detected < 0 || detected > 50000)) {
+          return {
+            provider: 'gemini',
+            success: false,
+            meterType,
+            detectedValue: detected,
+            unit: 'kg',
+            confidence,
+            isReadable: false,
+            notes: `Detected scale weight (${detected} kg) is outside realistic agricultural procurement range (0–50,000 kg).`,
+            error: 'RANGE_ANOMALY'
+          };
+        }
+        if (meterType === 'MOISTURE' && (detected < 0 || detected > 40)) {
+          return {
+            provider: 'gemini',
+            success: false,
+            meterType,
+            detectedValue: detected,
+            unit: '%',
+            confidence,
+            isReadable: false,
+            notes: `Detected moisture (${detected}%) is outside expected grain range (0–40%).`,
+            error: 'RANGE_ANOMALY'
+          };
+        }
+      }
+
       return {
         provider: 'gemini',
-        success: parsed.isReadable && typeof parsed.detectedValue === 'number',
+        success: isReadable && detected !== null,
         meterType,
-        detectedValue: typeof parsed.detectedValue === 'number' ? parsed.detectedValue : null,
+        detectedValue: detected,
         unit: parsed.unit || (meterType === 'SCALE' ? 'kg' : '%'),
-        confidence: typeof parsed.confidence === 'number' ? parsed.confidence : 0.85,
-        isReadable: Boolean(parsed.isReadable),
-        notes: parsed.notes || 'Successfully analyzed digital meter display.',
+        confidence,
+        isReadable,
+        notes: parsed.notes || (isReadable ? 'Successfully extracted reading from meter display.' : 'Display digits were not clearly readable.'),
         rawResponse: candidateText
       };
     } catch (err: any) {
+      clearTimeout(timeoutId);
+      if (err.name === 'AbortError') {
+        return {
+          provider: 'gemini',
+          success: false,
+          meterType,
+          detectedValue: null,
+          unit: null,
+          confidence: 0,
+          isReadable: false,
+          notes: `Gemini Vision request timed out after ${timeoutMs}ms. Network latency high.`,
+          error: 'TIMEOUT'
+        };
+      }
       return {
         provider: 'gemini',
         success: false,
@@ -179,9 +300,8 @@ Return strictly a JSON object with this exact schema:
     }
   }
 
-  // Mock / deterministic testing provider (used in offline tests or explicitly configured mock)
+  // Mock provider (explicitly used for automated testing)
   if (provider === 'mock') {
-    // In mock mode for testing, extract filename hint if present in notes or return standard test reading
     return {
       provider: 'mock',
       success: true,
@@ -230,7 +350,7 @@ export function compareWithManualReading(
       status: isManualOverride ? 'MANUAL_OVERRIDE' : 'FAILED',
       message: isManualOverride
         ? 'Manual verification recorded. AI OCR was unavailable or unreadable.'
-        : `AI vision recognition failed or unconfigured: ${aiResult?.notes || 'No reading obtained'}. Manual override required.`
+        : `AI vision recognition unavailable or failed: ${aiResult?.notes || 'No reading obtained'}. Manual override required.`
     };
   }
 
@@ -258,7 +378,7 @@ export function compareWithManualReading(
       withinTolerance: false,
       toleranceApplied: tolerance,
       status: 'DIFF_ACCEPTED',
-      message: `Manual override accepted with ${difference} ${unit} discrepancy. Supervisor audit record generated.`
+      message: `Manual override recorded with ${difference} ${unit} discrepancy. Supervisor review required.`
     };
   }
 
@@ -272,4 +392,3 @@ export function compareWithManualReading(
     message: `Mismatch detected! Manual entry (${manualValue} ${unit}) differs from AI display reading (${aiResult.detectedValue} ${unit}) by ${difference} ${unit} (tolerance: ±${tolerance} ${unit}). Operator review required.`
   };
 }
-

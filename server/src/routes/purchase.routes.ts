@@ -4,7 +4,7 @@ import { prisma } from '../lib/prisma';
 import { authenticateToken, requireRole } from '../middleware/auth';
 import { calculateProcurement, CalculationError } from '../lib/calculations';
 import { detectAnomalies } from '../lib/anomalyDetector';
-import { analyzeMeterImage, compareWithManualReading } from '../lib/visionService';
+import { analyzeMeterImage, compareWithManualReading, SCALE_TOLERANCE_KG, MOISTURE_TOLERANCE_PCT } from '../lib/visionService';
 import { sendSimulatedSms } from '../lib/smsSimulator';
 import { createAuditLog } from '../services/auditService';
 import { uploadPhotos } from '../middleware/upload';
@@ -60,11 +60,9 @@ router.post('/ai-verify', authenticateToken, uploadPhotos, async (req: any, res)
 
     if (file) {
       photoUrl = `/uploads/${file.filename}`;
-      // Read file buffer
       const buffer = file.buffer || require('fs').readFileSync(file.path);
       visionResult = await analyzeMeterImage(buffer, file.mimetype, type);
     } else {
-      // Vision without file provided
       visionResult = await analyzeMeterImage(Buffer.from(''), 'image/jpeg', type);
     }
 
@@ -89,7 +87,11 @@ router.post('/ai-verify', authenticateToken, uploadPhotos, async (req: any, res)
 
 /**
  * POST /api/purchases
- * Create a new procurement entry (with validations, math calculations, anomaly detection & SMS)
+ * Create a new procurement entry with:
+ * - Independent backend AI mismatch verification (blocks operator bypass)
+ * - Strict server-side published daily price enforcement (ignores client-supplied rates)
+ * - Centre-level access boundaries
+ * - Decimal-safe math, automated anomaly detection, simulated Marathi SMS & SHA-256 chained audit
  */
 router.post('/', authenticateToken, async (req, res) => {
   try {
@@ -101,7 +103,6 @@ router.post('/', authenticateToken, async (req, res) => {
       grossWeight,
       tareWeight,
       moisture,
-      ratePerQuintal,
       idempotencyKey,
       clientDeviceTimestamp,
       localCreationTimestamp,
@@ -110,8 +111,8 @@ router.post('/', authenticateToken, async (req, res) => {
       scaleAiWeight,
       moistureAiValue,
       aiConfidence,
-      aiVerificationStatus,
-      aiDiffNotes
+      aiDiffNotes,
+      managerApproval
     } = req.body;
 
     // Idempotency check: prevent duplicate submissions
@@ -142,54 +143,150 @@ router.post('/', authenticateToken, async (req, res) => {
       return res.status(404).json({ success: false, error: 'Selected farmer does not exist in registry.' });
     }
 
-    // 2. Verify Collection Centre
+    // 2. Verify Collection Centre & Enforce Operator Access Boundary
     const targetCentreId = req.user?.role === 'OPERATOR' && req.user.centreId
       ? req.user.centreId
       : centreId || farmer.centreId;
+
+    if (req.user?.role === 'OPERATOR') {
+      if (!req.user.centreId) {
+        return res.status(403).json({ success: false, error: 'Operator is not assigned to a collection centre.' });
+      }
+      if (centreId && centreId !== req.user.centreId) {
+        return res.status(403).json({ success: false, error: 'Access denied: Operators cannot submit purchases for other collection centres.' });
+      }
+    }
 
     const centre = await prisma.collectionCentre.findUnique({ where: { id: targetCentreId } });
     if (!centre) {
       return res.status(400).json({ success: false, error: 'Invalid collection centre.' });
     }
 
-    // 3. Verify Published Daily Price
-    const numericRate = Number(ratePerQuintal);
+    // 3. Strictly Verify Central Published Daily Price (Ignore any client-supplied rate)
+    const selectedCrop = crop || 'Soybean';
+    const selectedGrade = grade || 'Grade A';
+
     const activePrice = await prisma.priceBoard.findFirst({
       where: {
-        crop: crop || 'Soybean',
-        grade: grade || 'Grade A',
+        crop: selectedCrop,
+        grade: selectedGrade,
         isActive: true
       }
     });
 
-    if (!activePrice && (!numericRate || numericRate <= 0)) {
+    if (!activePrice) {
       return res.status(400).json({
         success: false,
-        error: `No published daily rate found for ${crop} (${grade}). Office Manager must publish prices first.`
+        error: `No published daily rate found for ${selectedCrop} (${selectedGrade}). Office Manager must publish prices first.`
       });
     }
 
-    const appliedRate = numericRate > 0 ? numericRate : activePrice!.ratePerQuintal;
+    // Server-enforced rate: Never trust client-supplied rate!
+    const appliedRate = activePrice.ratePerQuintal;
 
-    // 4. Mathematical Calculations
+    // 4. Independent Backend AI Reading Verification & Discrepancy Gate
+    const numGross = Number(grossWeight);
+    const numMoisture = Number(moisture);
+    const aiScale = (scaleAiWeight !== undefined && scaleAiWeight !== null && scaleAiWeight !== '') ? Number(scaleAiWeight) : null;
+    const aiMoist = (moistureAiValue !== undefined && moistureAiValue !== null && moistureAiValue !== '') ? Number(moistureAiValue) : null;
+
+    let scaleDiff: number | null = null;
+    let moistureDiff: number | null = null;
+    let hasAiMismatch = false;
+    const mismatchReasons: string[] = [];
+
+    if (aiScale !== null && !isNaN(aiScale)) {
+      scaleDiff = Math.round(Math.abs(numGross - aiScale) * 10) / 10;
+      if (scaleDiff > SCALE_TOLERANCE_KG) {
+        hasAiMismatch = true;
+        mismatchReasons.push(`Scale weight difference (${scaleDiff} kg) exceeds allowable tolerance of ±${SCALE_TOLERANCE_KG} kg (Manual: ${numGross} kg, AI: ${aiScale} kg).`);
+      }
+    }
+
+    if (aiMoist !== null && !isNaN(aiMoist)) {
+      moistureDiff = Math.round(Math.abs(numMoisture - aiMoist) * 10) / 10;
+      if (moistureDiff > MOISTURE_TOLERANCE_PCT) {
+        hasAiMismatch = true;
+        mismatchReasons.push(`Moisture difference (${moistureDiff}%) exceeds allowable tolerance of ±${MOISTURE_TOLERANCE_PCT}% (Manual: ${numMoisture}%, AI: ${aiMoist}%).`);
+      }
+    }
+
+    let computedAiStatus = 'NOT_PERFORMED';
+    if (aiScale !== null || aiMoist !== null) {
+      computedAiStatus = hasAiMismatch ? 'DIFF_ACCEPTED' : 'MATCH';
+    }
+
+    let reviewerId: string | null = null;
+    let reviewDecision: string | null = null;
+    let reviewedBy: string | null = null;
+    let reviewedAt: Date | null = null;
+    let reviewNotes: string | null = null;
+
+    if (hasAiMismatch) {
+      const isManagerActor = req.user?.role === 'MANAGER';
+
+      if (isManagerActor) {
+        reviewerId = req.user!.id;
+        reviewedBy = req.user!.fullName;
+        reviewDecision = 'APPROVE';
+        reviewedAt = new Date();
+        reviewNotes = req.body.reviewNotes || 'Manager directly reviewed and approved AI reading variance.';
+      } else if (managerApproval && managerApproval.managerId && managerApproval.decision === 'APPROVE') {
+        const managerUser = await prisma.user.findFirst({
+          where: { id: managerApproval.managerId, role: 'MANAGER' }
+        });
+        if (!managerUser) {
+          return res.status(403).json({
+            success: false,
+            error: 'Invalid or inactive Office Manager authorization for AI mismatch approval.'
+          });
+        }
+        if (!managerApproval.reason || managerApproval.reason.trim() === '') {
+          return res.status(400).json({
+            success: false,
+            error: 'Manager review reason is required to approve an AI measurement discrepancy.'
+          });
+        }
+        reviewerId = managerUser.id;
+        reviewedBy = managerUser.fullName;
+        reviewDecision = 'APPROVE';
+        reviewedAt = new Date();
+        reviewNotes = managerApproval.reason;
+      } else {
+        // Block operator from bypassing mismatch without verified manager approval!
+        return res.status(403).json({
+          success: false,
+          error: `AI measurement mismatch detected beyond allowed tolerance. Procurement creation blocked until reviewed and approved by an authorized Office Manager. ${mismatchReasons.join(' ')}`,
+          requiresManagerApproval: true,
+          mismatchDetails: {
+            scaleDiff,
+            moistureDiff,
+            tolerances: { scaleKg: SCALE_TOLERANCE_KG, moisturePct: MOISTURE_TOLERANCE_PCT },
+            reasons: mismatchReasons
+          }
+        });
+      }
+    }
+
+    // 5. Mathematical Calculations
     const calcResult = calculateProcurement({
-      grossWeight: Number(grossWeight),
+      grossWeight: numGross,
       tareWeight: Number(tareWeight),
-      moisture: Number(moisture),
+      moisture: numMoisture,
       ratePerQuintal: appliedRate
     });
 
-    // 5. Generate Unique Slip Number
+    // 6. Generate Unique Slip Number
     const slipNumber = await generateUniqueSlipNumber(centre.code);
 
-    // 6. Run Automated Anomaly Detection
+    // 7. Run Automated Anomaly Detection
     const anomalyCheck = await detectAnomalies(prisma, {
       farmerId: farmer.id,
       centreId: centre.id,
-      crop: crop || 'Soybean',
-      grossWeight: Number(grossWeight),
+      crop: selectedCrop,
+      grossWeight: numGross,
       netWeight: calcResult.netWeight,
-      moisture: Number(moisture),
+      moisture: numMoisture,
       purchaseDate: new Date()
     });
 
@@ -203,7 +300,6 @@ router.post('/', authenticateToken, async (req, res) => {
       isFlagged = true;
       flagReason = anomalyCheck.flags.map(f => f.description).join('; ');
     } else {
-      // If operator entered cleanly and no flags, eligible for approval
       status = 'PENDING_APPROVAL';
     }
 
@@ -213,12 +309,12 @@ router.post('/', authenticateToken, async (req, res) => {
         idempotencyKey: key,
         farmerId: farmer.id,
         centreId: centre.id,
-        crop: crop || 'Soybean',
-        grade: grade || 'Grade A',
-        grossWeight: Math.round(Number(grossWeight) * 10) / 10,
+        crop: selectedCrop,
+        grade: selectedGrade,
+        grossWeight: Math.round(numGross * 10) / 10,
         tareWeight: Math.round(Number(tareWeight) * 10) / 10,
         actualWeight: calcResult.actualWeight,
-        moisture: Math.round(Number(moisture) * 10) / 10,
+        moisture: Math.round(numMoisture * 10) / 10,
         moistureDeductionPercent: calcResult.moistureDeductionPercent,
         netWeight: calcResult.netWeight,
         ratePerQuintal: appliedRate,
@@ -226,11 +322,16 @@ router.post('/', authenticateToken, async (req, res) => {
         status,
         scalePhotoUrl: scalePhotoUrl || null,
         moisturePhotoUrl: moisturePhotoUrl || null,
-        scaleAiWeight: scaleAiWeight ? Number(scaleAiWeight) : null,
-        moistureAiValue: moistureAiValue ? Number(moistureAiValue) : null,
+        scaleAiWeight: aiScale,
+        moistureAiValue: aiMoist,
         aiConfidence: aiConfidence ? Number(aiConfidence) : null,
-        aiVerificationStatus: aiVerificationStatus || 'NOT_PERFORMED',
-        aiDiffNotes: aiDiffNotes || null,
+        aiVerificationStatus: computedAiStatus,
+        aiDiffNotes: aiDiffNotes || (hasAiMismatch ? mismatchReasons.join('; ') : null),
+        reviewerId,
+        reviewDecision,
+        reviewedBy,
+        reviewedAt,
+        reviewNotes,
         clientDeviceTimestamp: clientDeviceTimestamp ? new Date(clientDeviceTimestamp) : null,
         localCreationTimestamp: localCreationTimestamp ? new Date(localCreationTimestamp) : null,
         serverReceivedTimestamp: new Date(),
@@ -261,7 +362,7 @@ router.post('/', authenticateToken, async (req, res) => {
       }
     }
 
-    // 7. Dispatch Simulated Marathi SMS
+    // 8. Dispatch Simulated Marathi SMS
     const smsResult = await sendSimulatedSms({
       farmerName: farmer.fullName,
       farmerMobile: farmer.mobileNumber,
@@ -285,7 +386,7 @@ router.post('/', authenticateToken, async (req, res) => {
       }
     });
 
-    // 8. Create Immutable Audit Log with SHA-256 Hash Chaining
+    // 9. Create Immutable Audit Log with SHA-256 Hash Chaining
     await createAuditLog({
       entityType: 'PURCHASE',
       entityId: purchase.id,
@@ -298,7 +399,10 @@ router.post('/', authenticateToken, async (req, res) => {
         crop: purchase.crop,
         grossWeight: purchase.grossWeight,
         netWeight: purchase.netWeight,
+        ratePerQuintal: purchase.ratePerQuintal,
         totalAmount: purchase.totalAmount,
+        aiVerificationStatus: computedAiStatus,
+        hasAiMismatch,
         isFlagged,
         flagReason
       }
@@ -324,7 +428,7 @@ router.post('/', authenticateToken, async (req, res) => {
 
 /**
  * GET /api/purchases
- * List and filter purchases
+ * List and filter purchases with strict collection-centre restriction for operators
  */
 router.get('/', authenticateToken, async (req, res) => {
   try {
@@ -332,8 +436,11 @@ router.get('/', authenticateToken, async (req, res) => {
 
     const where: any = {};
 
-    // Operators are restricted to their assigned centre
-    if (req.user?.role === 'OPERATOR' && req.user.centreId) {
+    // Operators are strictly restricted to their assigned centre
+    if (req.user?.role === 'OPERATOR') {
+      if (!req.user.centreId) {
+        return res.status(403).json({ success: false, error: 'Operator account is not assigned to any collection centre.' });
+      }
       where.centreId = req.user.centreId;
     } else if (centreId && centreId !== 'ALL') {
       where.centreId = String(centreId);
@@ -407,7 +514,7 @@ router.get('/', authenticateToken, async (req, res) => {
 
 /**
  * GET /api/purchases/:slipNumber
- * Fetch full slip details for printing or mobile viewing
+ * Fetch full slip details for printing or mobile viewing (with centre permission enforcement)
  */
 router.get('/:slipNumber', authenticateToken, async (req, res) => {
   try {
@@ -429,6 +536,16 @@ router.get('/:slipNumber', authenticateToken, async (req, res) => {
       return res.status(404).json({ success: false, error: 'Procurement slip not found.' });
     }
 
+    // Operators cannot access slips from other centres
+    if (req.user?.role === 'OPERATOR' && req.user.centreId) {
+      if (purchase.centreId !== req.user.centreId) {
+        return res.status(403).json({
+          success: false,
+          error: 'Access denied: You do not have permission to access purchases from other collection centres.'
+        });
+      }
+    }
+
     return res.json({ success: true, purchase });
   } catch (err: any) {
     return res.status(500).json({ success: false, error: err.message });
@@ -437,7 +554,7 @@ router.get('/:slipNumber', authenticateToken, async (req, res) => {
 
 /**
  * POST /api/purchases/:id/review
- * Office Manager reviews flagged purchase (Approve or Reject with audit trail)
+ * Office Manager reviews flagged purchase (Approve or Reject with full audit trail)
  */
 router.post('/:id/review', authenticateToken, requireRole(['MANAGER']), async (req, res) => {
   try {
@@ -467,6 +584,8 @@ router.post('/:id/review', authenticateToken, requireRole(['MANAGER']), async (r
         status: newStatus,
         isFlagged,
         paymentEligibility: isEligible,
+        reviewerId: req.user!.id,
+        reviewDecision: decision,
         reviewedBy: req.user!.fullName,
         reviewedAt: new Date(),
         reviewNotes: notes || `Manager ${req.user!.fullName} ${decision.toLowerCase()}d purchase.`

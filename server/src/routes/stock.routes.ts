@@ -133,7 +133,15 @@ router.get('/dispatches', authenticateToken, async (req, res) => {
     const { centreId, crop } = req.query;
     const where: any = {};
 
-    if (centreId && centreId !== 'ALL') where.centreId = String(centreId);
+    // Operators are restricted to their assigned centre
+    if (req.user?.role === 'OPERATOR') {
+      if (!req.user.centreId) {
+        return res.status(403).json({ success: false, error: 'Operator is not assigned to a collection centre.' });
+      }
+      where.centreId = req.user.centreId;
+    } else if (centreId && centreId !== 'ALL') {
+      where.centreId = String(centreId);
+    }
     if (crop && crop !== 'ALL') where.crop = String(crop);
 
     const dispatches = await prisma.dispatch.findMany({
@@ -170,6 +178,16 @@ router.post('/dispatches', authenticateToken, async (req, res) => {
 
     if (!centreId || !crop || !truckNumber || !driverName || !dispatchWeight || !destination) {
       return res.status(400).json({ success: false, error: 'All primary dispatch fields are required.' });
+    }
+
+    // Operators cannot record dispatches for other centres
+    if (req.user?.role === 'OPERATOR') {
+      if (!req.user.centreId) {
+        return res.status(403).json({ success: false, error: 'Operator is not assigned to a collection centre.' });
+      }
+      if (centreId !== req.user.centreId) {
+        return res.status(403).json({ success: false, error: 'Access denied: Operators cannot record dispatches for other collection centres.' });
+      }
     }
 
     const centre = await prisma.collectionCentre.findUnique({ where: { id: centreId } });
