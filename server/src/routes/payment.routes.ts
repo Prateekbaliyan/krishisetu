@@ -73,8 +73,8 @@ router.get('/eligible', authenticateToken, requireRole(['MANAGER']), async (req,
       }
       farmerGroups[fId].purchaseIds.push(p.id);
       farmerGroups[fId].slipNumbers.push(p.slipNumber);
-      farmerGroups[fId].totalAmount += p.totalAmount;
-      farmerGroups[fId].totalNetWeightKg += p.netWeight;
+      farmerGroups[fId].totalAmount += Number(p.totalAmount || 0);
+      farmerGroups[fId].totalNetWeightKg += Number(p.netWeight || 0);
     });
 
     const groupedList = Object.values(farmerGroups).map(g => ({
@@ -83,7 +83,7 @@ router.get('/eligible', authenticateToken, requireRole(['MANAGER']), async (req,
       totalNetWeightKg: Math.round(g.totalNetWeightKg * 10) / 10
     }));
 
-    const totalEligibleAmount = eligiblePurchases.reduce((acc: number, p: any) => acc + p.totalAmount, 0);
+    const totalEligibleAmount = eligiblePurchases.reduce((acc: number, p: any) => acc + Number(p.totalAmount || 0), 0);
 
     return res.json({
       success: true,
@@ -161,11 +161,11 @@ router.post('/create-run', authenticateToken, requireRole(['MANAGER']), async (r
         if (!farmerTotals[fId]) {
           farmerTotals[fId] = { farmer: p.farmer, amount: 0, slips: [] };
         }
-        farmerTotals[fId].amount += p.totalAmount;
+        farmerTotals[fId].amount += Number(p.totalAmount || 0);
         farmerTotals[fId].slips.push(p.slipNumber);
       }
 
-      const totalAmount = purchases.reduce((acc: number, p: any) => acc + p.totalAmount, 0);
+      const totalAmount = purchases.reduce((acc: number, p: any) => acc + Number(p.totalAmount || 0), 0);
       const totalFarmers = Object.keys(farmerTotals).length;
 
       // 5. Create PaymentRun in database (Status: PENDING - generated, not yet processed)

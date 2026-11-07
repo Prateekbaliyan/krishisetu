@@ -42,26 +42,26 @@ router.get('/summary', authenticateToken, async (req, res) => {
         if (!centreCropMap[p.crop]) {
           centreCropMap[p.crop] = { inward: 0, dispatched: 0, loss: 0, current: 0 };
         }
-        centreCropMap[p.crop].inward += p.netWeight;
+        centreCropMap[p.crop].inward += Number(p.netWeight || 0);
 
         if (!cropTotals[p.crop]) {
           cropTotals[p.crop] = { inwardKg: 0, dispatchedKg: 0, weightLossKg: 0, currentStockKg: 0 };
         }
-        cropTotals[p.crop].inwardKg += p.netWeight;
+        cropTotals[p.crop].inwardKg += Number(p.netWeight || 0);
       }
 
       for (const d of centre.dispatches) {
         if (!centreCropMap[d.crop]) {
           centreCropMap[d.crop] = { inward: 0, dispatched: 0, loss: 0, current: 0 };
         }
-        centreCropMap[d.crop].dispatched += d.dispatchWeight;
-        centreCropMap[d.crop].loss += d.weightLossKg;
+        centreCropMap[d.crop].dispatched += Number(d.dispatchWeight || 0);
+        centreCropMap[d.crop].loss += Number(d.weightLossKg || 0);
 
         if (!cropTotals[d.crop]) {
           cropTotals[d.crop] = { inwardKg: 0, dispatchedKg: 0, weightLossKg: 0, currentStockKg: 0 };
         }
-        cropTotals[d.crop].dispatchedKg += d.dispatchWeight;
-        cropTotals[d.crop].weightLossKg += d.weightLossKg;
+        cropTotals[d.crop].dispatchedKg += Number(d.dispatchWeight || 0);
+        cropTotals[d.crop].weightLossKg += Number(d.weightLossKg || 0);
       }
 
       // Compute current stock for each crop

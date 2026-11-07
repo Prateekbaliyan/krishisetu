@@ -881,7 +881,7 @@ async function main() {
 
   // 9. Seed Sample Completed Payment Run
   const paidPurchases = [morePurchases[0], morePurchases[1]]; // Pandurang Bhosale & Suresh Rathod
-  const paidRunTotal = paidPurchases.reduce((sum, p) => sum + p.totalAmount, 0);
+  const paidRunTotal = paidPurchases.reduce((sum: number, p: any) => sum + Number(p.totalAmount || 0), 0);
   const batchNum = 'BATCH-20261101-001';
 
   const paymentRun = await prisma.paymentRun.create({
@@ -904,7 +904,7 @@ async function main() {
       data: {
         paymentRunId: paymentRun.id,
         farmerId: farmer!.id,
-        amount: p.totalAmount,
+        amount: Number(p.totalAmount || 0),
         bankAccountName: farmer!.bankAccountName,
         bankAccountNumber: farmer!.bankAccountNumber,
         ifscCode: farmer!.ifscCode,

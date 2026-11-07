@@ -36,9 +36,9 @@ router.get('/summary', authenticateToken, async (req, res) => {
     });
 
     const todayCount = todayPurchases.length;
-    const todayProcurementKg = todayPurchases.reduce((acc: number, curr: any) => acc + curr.netWeight, 0);
+    const todayProcurementKg = todayPurchases.reduce((acc: number, curr: any) => acc + Number(curr.netWeight || 0), 0);
     const todayProcurementTonnes = Math.round((todayProcurementKg / 1000) * 100) / 100;
-    const todayPurchaseValue = todayPurchases.reduce((acc: number, curr: any) => acc + curr.totalAmount, 0);
+    const todayPurchaseValue = todayPurchases.reduce((acc: number, curr: any) => acc + Number(curr.totalAmount || 0), 0);
 
     // 2. All-Time / Current Pipeline Totals
     const allPurchases = await prisma.purchase.findMany({
@@ -60,7 +60,7 @@ router.get('/summary', authenticateToken, async (req, res) => {
 
     // Pending payment: approved purchases not yet linked to a paid payment run
     const pendingPaymentPurchases = allPurchases.filter((p: any) => (p.status === 'APPROVED' || p.status === 'PENDING_APPROVAL') && !p.paymentRunId);
-    const pendingPaymentAmount = pendingPaymentPurchases.reduce((acc: number, curr: any) => acc + curr.totalAmount, 0);
+    const pendingPaymentAmount = pendingPaymentPurchases.reduce((acc: number, curr: any) => acc + Number(curr.totalAmount || 0), 0);
     const pendingPaymentCount = pendingPaymentPurchases.length;
 
     // 3. Crop-wise Procurement (Soybean vs Tur)
@@ -74,8 +74,8 @@ router.get('/summary', authenticateToken, async (req, res) => {
       if (!cropMap[crop]) {
         cropMap[crop] = { weightKg: 0, amount: 0, count: 0 };
       }
-      cropMap[crop].weightKg += p.netWeight;
-      cropMap[crop].amount += p.totalAmount;
+      cropMap[crop].weightKg += Number(p.netWeight || 0);
+      cropMap[crop].amount += Number(p.totalAmount || 0);
       cropMap[crop].count += 1;
     });
 
@@ -95,8 +95,8 @@ router.get('/summary', authenticateToken, async (req, res) => {
 
     const centreBreakdown = centres.map((centre: any) => {
       const centrePurchases = allPurchases.filter((p: any) => p.centreId === centre.id);
-      const totalWeightKg = centrePurchases.reduce((acc: number, p: any) => acc + p.netWeight, 0);
-      const totalAmount = centrePurchases.reduce((acc: number, p: any) => acc + p.totalAmount, 0);
+      const totalWeightKg = centrePurchases.reduce((acc: number, p: any) => acc + Number(p.netWeight || 0), 0);
+      const totalAmount = centrePurchases.reduce((acc: number, p: any) => acc + Number(p.totalAmount || 0), 0);
       return {
         centreId: centre.id,
         code: centre.code,

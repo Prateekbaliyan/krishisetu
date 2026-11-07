@@ -110,11 +110,11 @@ router.get('/:id', authenticateToken, async (req, res) => {
       return res.status(404).json({ success: false, error: 'Farmer not found.' });
     }
 
-    const totalWeightDelivered = farmer.purchases.reduce((acc: number, p: any) => acc + p.netWeight, 0);
-    const totalProcurementValue = farmer.purchases.reduce((acc: number, p: any) => acc + p.totalAmount, 0);
+    const totalWeightDelivered = farmer.purchases.reduce((acc: number, p: any) => acc + Number(p.netWeight || 0), 0);
+    const totalProcurementValue = farmer.purchases.reduce((acc: number, p: any) => acc + Number(p.totalAmount || 0), 0);
     const totalPaidAmount = farmer.payments
       .filter((p: any) => p.status === 'PAID')
-      .reduce((acc: number, p: any) => acc + p.amount, 0);
+      .reduce((acc: number, p: any) => acc + Number(p.amount || 0), 0);
 
     return res.json({
       success: true,
