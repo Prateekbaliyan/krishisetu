@@ -40,7 +40,7 @@ This guide provides deployment instructions for running KrishiSetu across **Verc
 3. Configure settings:
    - **Root Directory:** `server`
    - **Environment:** `Node`
-   - **Build Command:** `npm install && npm run build && npx prisma db push --schema=prisma/schema.postgresql.prisma`
+   - **Build Command:** `npm install && npx prisma generate --schema=prisma/schema.postgresql.prisma && npm run build && npx prisma db push --schema=prisma/schema.postgresql.prisma`
    - **Start Command:** `npm start`
    - **Health Check Path:** `/api/health`
 4. Set Environment Variables in Render Dashboard (**Environment > Add Environment Variable**):

@@ -74,7 +74,7 @@ router.post('/publish', authenticateToken, requireRole(['MANAGER']), async (req,
     const publisherId = req.user!.id;
     const reason = changeReason || 'Routine Daily Market Procurement Rate Revision';
 
-    const publishedRecords = [];
+    const publishedRecords: any[] = [];
 
     for (const item of rates) {
       const rate = Number(item.ratePerQuintal);

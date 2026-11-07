@@ -57,7 +57,7 @@ router.get('/eligible', authenticateToken, requireRole(['MANAGER']), async (req,
       totalNetWeightKg: number;
     }> = {};
 
-    eligiblePurchases.forEach(p => {
+    eligiblePurchases.forEach((p: any) => {
       const fId = p.farmer.id;
       if (!farmerGroups[fId]) {
         farmerGroups[fId] = {
@@ -83,7 +83,7 @@ router.get('/eligible', authenticateToken, requireRole(['MANAGER']), async (req,
       totalNetWeightKg: Math.round(g.totalNetWeightKg * 10) / 10
     }));
 
-    const totalEligibleAmount = eligiblePurchases.reduce((acc, p) => acc + p.totalAmount, 0);
+    const totalEligibleAmount = eligiblePurchases.reduce((acc: number, p: any) => acc + p.totalAmount, 0);
 
     return res.json({
       success: true,
@@ -118,7 +118,7 @@ router.post('/create-run', authenticateToken, requireRole(['MANAGER']), async (r
     const dateStr = new Date().toISOString().slice(0, 10).replace(/-/g, '');
 
     // Execute batch generation within an isolated database transaction
-    const result = await prisma.$transaction(async (tx) => {
+    const result = await prisma.$transaction(async (tx: any) => {
       // 1. Recheck eligibility inside transaction with strict criteria
       const purchases = await tx.purchase.findMany({
         where: {
@@ -165,7 +165,7 @@ router.post('/create-run', authenticateToken, requireRole(['MANAGER']), async (r
         farmerTotals[fId].slips.push(p.slipNumber);
       }
 
-      const totalAmount = purchases.reduce((acc, p) => acc + p.totalAmount, 0);
+      const totalAmount = purchases.reduce((acc: number, p: any) => acc + p.totalAmount, 0);
       const totalFarmers = Object.keys(farmerTotals).length;
 
       // 5. Create PaymentRun in database (Status: PENDING - generated, not yet processed)
@@ -181,7 +181,7 @@ router.post('/create-run', authenticateToken, requireRole(['MANAGER']), async (r
       });
 
       // 6. Create individual Payment records for each farmer
-      const paymentRecordsForCsv = [];
+      const paymentRecordsForCsv: any[] = [];
       for (const [farmerId, data] of Object.entries(farmerTotals)) {
         const pRecord = await tx.payment.create({
           data: {
@@ -213,7 +213,7 @@ router.post('/create-run', authenticateToken, requireRole(['MANAGER']), async (r
       // 7. Atomically link purchases to this paymentRun (guards against concurrent race conditions)
       const updateResult = await tx.purchase.updateMany({
         where: {
-          id: { in: purchases.map(p => p.id) },
+          id: { in: purchases.map((p: any) => p.id) },
           paymentRunId: null
         },
         data: { paymentRunId: paymentRun.id }

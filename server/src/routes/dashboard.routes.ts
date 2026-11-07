@@ -36,9 +36,9 @@ router.get('/summary', authenticateToken, async (req, res) => {
     });
 
     const todayCount = todayPurchases.length;
-    const todayProcurementKg = todayPurchases.reduce((acc, curr) => acc + curr.netWeight, 0);
+    const todayProcurementKg = todayPurchases.reduce((acc: number, curr: any) => acc + curr.netWeight, 0);
     const todayProcurementTonnes = Math.round((todayProcurementKg / 1000) * 100) / 100;
-    const todayPurchaseValue = todayPurchases.reduce((acc, curr) => acc + curr.totalAmount, 0);
+    const todayPurchaseValue = todayPurchases.reduce((acc: number, curr: any) => acc + curr.totalAmount, 0);
 
     // 2. All-Time / Current Pipeline Totals
     const allPurchases = await prisma.purchase.findMany({
@@ -54,13 +54,13 @@ router.get('/summary', authenticateToken, async (req, res) => {
       }
     });
 
-    const approvedCount = allPurchases.filter(p => p.status === 'APPROVED').length;
-    const flaggedCount = allPurchases.filter(p => p.isFlagged || p.status === 'FLAGGED').length;
-    const pendingPurchases = allPurchases.filter(p => p.status === 'PENDING_APPROVAL');
+    const approvedCount = allPurchases.filter((p: any) => p.status === 'APPROVED').length;
+    const flaggedCount = allPurchases.filter((p: any) => p.isFlagged || p.status === 'FLAGGED').length;
+    const pendingPurchases = allPurchases.filter((p: any) => p.status === 'PENDING_APPROVAL');
 
     // Pending payment: approved purchases not yet linked to a paid payment run
-    const pendingPaymentPurchases = allPurchases.filter(p => (p.status === 'APPROVED' || p.status === 'PENDING_APPROVAL') && !p.paymentRunId);
-    const pendingPaymentAmount = pendingPaymentPurchases.reduce((acc, curr) => acc + curr.totalAmount, 0);
+    const pendingPaymentPurchases = allPurchases.filter((p: any) => (p.status === 'APPROVED' || p.status === 'PENDING_APPROVAL') && !p.paymentRunId);
+    const pendingPaymentAmount = pendingPaymentPurchases.reduce((acc: number, curr: any) => acc + curr.totalAmount, 0);
     const pendingPaymentCount = pendingPaymentPurchases.length;
 
     // 3. Crop-wise Procurement (Soybean vs Tur)
@@ -69,7 +69,7 @@ router.get('/summary', authenticateToken, async (req, res) => {
       Tur: { weightKg: 0, amount: 0, count: 0 }
     };
 
-    allPurchases.forEach(p => {
+    allPurchases.forEach((p: any) => {
       const crop = p.crop || 'Other';
       if (!cropMap[crop]) {
         cropMap[crop] = { weightKg: 0, amount: 0, count: 0 };
@@ -93,10 +93,10 @@ router.get('/summary', authenticateToken, async (req, res) => {
       select: { id: true, code: true, name: true, village: true }
     });
 
-    const centreBreakdown = centres.map(centre => {
-      const centrePurchases = allPurchases.filter(p => p.centreId === centre.id);
-      const totalWeightKg = centrePurchases.reduce((acc, p) => acc + p.netWeight, 0);
-      const totalAmount = centrePurchases.reduce((acc, p) => acc + p.totalAmount, 0);
+    const centreBreakdown = centres.map((centre: any) => {
+      const centrePurchases = allPurchases.filter((p: any) => p.centreId === centre.id);
+      const totalWeightKg = centrePurchases.reduce((acc: number, p: any) => acc + p.netWeight, 0);
+      const totalAmount = centrePurchases.reduce((acc: number, p: any) => acc + p.totalAmount, 0);
       return {
         centreId: centre.id,
         code: centre.code,

@@ -114,7 +114,7 @@ export async function detectAnomalies(
   });
 
   if (centreRecentPurchases.length >= config.uniformMoistureStreakThreshold - 1) {
-    const allMatch = centreRecentPurchases.every(p => Math.abs(p.moisture - purchaseData.moisture) < 0.05);
+    const allMatch = centreRecentPurchases.every((p: any) => Math.abs(p.moisture - purchaseData.moisture) < 0.05);
     if (allMatch) {
       flags.push({
         flagType: 'UNIFORM_MOISTURE_STREAK',
@@ -123,7 +123,7 @@ export async function detectAnomalies(
         details: {
           moistureValue: purchaseData.moisture,
           consecutiveCount: config.uniformMoistureStreakThreshold,
-          precedingSlips: centreRecentPurchases.map(p => p.slipNumber)
+          precedingSlips: centreRecentPurchases.map((p: any) => p.slipNumber)
         }
       });
     }

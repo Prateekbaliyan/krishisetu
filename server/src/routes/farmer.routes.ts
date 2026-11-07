@@ -52,7 +52,7 @@ router.get('/', authenticateToken, async (req, res) => {
     });
 
     // Mask bank account numbers in API response
-    const maskedFarmers = farmers.map(f => ({
+    const maskedFarmers = farmers.map((f: any) => ({
       ...f,
       rawAccountNumber: undefined, // Never expose raw
       bankAccountNumber: maskAccountNumber(f.bankAccountNumber)
@@ -60,7 +60,7 @@ router.get('/', authenticateToken, async (req, res) => {
 
     // Also get distinct villages for filtering
     const allFarmers = await prisma.farmer.findMany({ select: { village: true } });
-    const distinctVillages = Array.from(new Set(allFarmers.map(f => f.village))).sort();
+    const distinctVillages = Array.from(new Set(allFarmers.map((f: any) => f.village))).sort();
 
     return res.json({
       success: true,
@@ -110,11 +110,11 @@ router.get('/:id', authenticateToken, async (req, res) => {
       return res.status(404).json({ success: false, error: 'Farmer not found.' });
     }
 
-    const totalWeightDelivered = farmer.purchases.reduce((acc, p) => acc + p.netWeight, 0);
-    const totalProcurementValue = farmer.purchases.reduce((acc, p) => acc + p.totalAmount, 0);
+    const totalWeightDelivered = farmer.purchases.reduce((acc: number, p: any) => acc + p.netWeight, 0);
+    const totalProcurementValue = farmer.purchases.reduce((acc: number, p: any) => acc + p.totalAmount, 0);
     const totalPaidAmount = farmer.payments
-      .filter(p => p.status === 'PAID')
-      .reduce((acc, p) => acc + p.amount, 0);
+      .filter((p: any) => p.status === 'PAID')
+      .reduce((acc: number, p: any) => acc + p.amount, 0);
 
     return res.json({
       success: true,

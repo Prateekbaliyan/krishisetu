@@ -32,7 +32,7 @@ router.get('/summary', authenticateToken, async (req, res) => {
     };
 
     // Centre-wise Breakdown
-    const centreSummaries = centres.map(centre => {
+    const centreSummaries = centres.map((centre: any) => {
       const centreCropMap: Record<string, { inward: number; dispatched: number; loss: number; current: number }> = {
         Soybean: { inward: 0, dispatched: 0, loss: 0, current: 0 },
         Tur: { inward: 0, dispatched: 0, loss: 0, current: 0 }

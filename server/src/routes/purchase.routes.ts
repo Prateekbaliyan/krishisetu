@@ -296,7 +296,7 @@ router.post('/', authenticateToken, async (req, res) => {
     // Determine initial status
     let status = 'PENDING_APPROVAL';
     let isFlagged = false;
-    let flagReason = null;
+    let flagReason: string | null = null;
 
     if (anomalyCheck.isFlagged) {
       status = 'FLAGGED';
