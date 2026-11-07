@@ -136,16 +136,33 @@ router.post('/batch', authenticateToken, async (req, res) => {
           throw new Error(`Invalid or unsupported crop: ${crop || 'unspecified'}. Supported crops: Soybean, Tur.`);
         }
 
+        // Determine applicable procurement date from client timestamp (localCreationTimestamp preferred)
+        const rawProcurementDate = item.localCreationTimestamp || item.clientDeviceTimestamp;
+        let procurementDate = new Date();
+        if (rawProcurementDate) {
+          const parsed = new Date(rawProcurementDate);
+          if (!isNaN(parsed.getTime())) {
+            procurementDate = parsed;
+          }
+        }
+        const procurementDateStr = procurementDate.toISOString().slice(0, 10);
+
+        // Select the latest valid published price effective on or before the procurement date.
+        // Never apply a future-dated price to an earlier procurement; never trust client-supplied rates!
         const activePrice = await prisma.priceBoard.findFirst({
           where: {
             crop,
             grade,
-            isActive: true
+            isActive: true,
+            effectiveDate: { lte: procurementDateStr }
+          },
+          orderBy: {
+            effectiveDate: 'desc'
           }
         });
 
         if (!activePrice) {
-          throw new Error(`No active published daily price found for ${crop} (${grade}). Offline purchase cannot be synced until Office Manager publishes daily rates.`);
+          throw new Error(`No applicable published daily price found for ${crop} (${grade}) on or before procurement date (${procurementDateStr}). Offline purchase cannot be synced until valid rates are published.`);
         }
 
         // Server-enforced rate: Never trust client-supplied rate or fall back to hardcoded numbers!

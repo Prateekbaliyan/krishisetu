@@ -84,15 +84,20 @@ npm --prefix client install
 npm run db:push
 npm run db:seed
 
-# 3. Run automated test suites (all 44 tests: 40 backend, 4 frontend)
+# 3. Run automated test suites (all 52 tests: 48 backend, 4 frontend)
 npm test
 
 # 4. Start local development servers
-# On Windows, you can double-click `start.bat` or run:
-npm run dev
-# Or individually:
-# Terminal 1: Backend API (port 5000) -> npm run dev:server
-# Terminal 2: Frontend Client (port 5173) -> npm run dev:client
+# Note: The backend API and frontend client run in separate terminals.
+
+# Terminal 1: Backend API (port 5000, with hot reload via tsx)
+npm run dev:server
+
+# Terminal 2: Frontend Client (port 5173, with hot reload via Vite)
+npm run dev:client
+
+# Alternative for Windows:
+# You can double-click `start.bat`. It launches the backend server (`npm --prefix server start` on port 5000) and frontend client (`npm --prefix client run dev -- --host` on port 5173) in two separate command windows and opens `http://localhost:5173` in your default browser. (Ensure you have run `npm run build:server` at least once before using start.bat so dist/index.js is available).
 ```
 
 Open your browser at `http://localhost:5173`.

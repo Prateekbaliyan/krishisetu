@@ -28,7 +28,7 @@ KrishiSetu is an enterprise SaaS platform that bridges remote village collection
 | **Database & ORM** | PostgreSQL (Supabase/Render) / SQLite (Local Dev), Prisma ORM | Dual schema support allowing zero-config local runs and scalable cloud SQL |
 | **Authentication** | JWT, bcryptjs | Stateless, role-based access control with fail-fast production secret validation |
 | **AI Vision OCR** | Google Gemini Vision API (`gemini-3.5-flash-lite`) | Actual multimodal image analysis for electronic weighing scale & moisture meter displays |
-| **Automated Testing** | Vitest, Supertest | Fast unit and end-to-end integration test execution (44 passing automated tests) |
+| **Automated Testing** | Vitest, Supertest | Fast unit and end-to-end integration test execution (52 passing automated tests) |
 
 ---
 
@@ -95,7 +95,8 @@ flowchart TD
 - **Independent Backend AI Mismatch Enforcement:**
   - Tolerances: Scale difference $\le 2.0\text{ kg}$; Moisture difference $\le 0.5\%$.
   - When manual entries differ from AI readings beyond tolerance, the backend strictly ignores client-supplied `aiVerificationStatus: 'MATCH'` bypass attempts.
-  - Procurement creation is blocked with HTTP 403 unless authorized Office Manager approval is attached (`managerApproval: { managerId, decision: 'APPROVE', reason }`).
+  - Procurement creation is blocked with HTTP 403 unless an authenticated user with the `MANAGER` role approves the discrepancy with a mandatory non-empty review reason.
+  - The manager's identity is strictly derived from the verified server-side JWT session (`req.user`), completely ignoring any client-supplied `managerId` to prevent identity spoofing by Centre Operators.
   - Stores `reviewerId`, `reviewDecision`, `reviewedBy`, `reviewedAt`, and `reviewNotes` in the purchase record.
 
 ### 4.2. Procurement Daily Price Board & Server Enforcement
@@ -165,9 +166,9 @@ flowchart TD
 
 ## 5. Verification & Automated Test Results
 
-The repository features 44 automated tests across 5 test suites (100% passing):
+The repository features 52 automated tests across 5 test suites (100% passing):
 
-1. **`server/tests/security-fixes.test.ts` (14/14 passed):**
+1. **`server/tests/security-fixes.test.ts` (22/22 passed):**
    - Production JWT secret validation (fail-fast on missing/insecure secret).
    - AI mismatch blocks operator procurement creation.
    - Authorized Office Manager approval allows AI variance creation.

@@ -364,9 +364,10 @@ describe('KrishiSetu Security, Hardening & Compliance Verification Suite', () =>
       expect(purchase!.ratePerQuintal).not.toBe(fakePrice);
     });
 
-    it('rejects sync record when no active published price exists for the crop', async () => {
+    it('rejects sync record when no active published price exists, or when price is expired or future-dated', async () => {
       const syncKey = `offline-no-price-${Date.now()}`;
 
+      // 1. Unpublished / unsupported crop
       const res = await request(app)
         .post('/api/sync/batch')
         .set('Authorization', `Bearer ${operatorToken}`)
@@ -393,16 +394,97 @@ describe('KrishiSetu Security, Hardening & Compliance Verification Suite', () =>
       expect(res.body.batchSummary.syncedCount).toBe(0);
       expect(res.body.batchSummary.failedCount).toBe(1);
       expect(res.body.results[0].status).toBe('FAILED');
-      expect(res.body.results[0].error).toMatch(/Invalid or unsupported crop|No active published daily price/i);
+      expect(res.body.results[0].error).toMatch(/Invalid or unsupported crop|No applicable published daily price/i);
 
       // Verify no record was created in database
       const purchase = await prisma.purchase.findUnique({
         where: { idempotencyKey: syncKey }
       });
       expect(purchase).toBeNull();
+
+      // 2. Expired / Inactive Price: Verify an inactive price cannot be used
+      const expiredKey = `offline-expired-price-${Date.now()}`;
+      const expiredPrice = await prisma.priceBoard.create({
+        data: {
+          crop: 'Soybean',
+          grade: 'Grade B',
+          ratePerQuintal: 4200.00,
+          effectiveDate: '2026-10-01',
+          publishedBy: 'System Test',
+          isActive: false // Expired / Deactivated
+        }
+      });
+
+      const resExpired = await request(app)
+        .post('/api/sync/batch')
+        .set('Authorization', `Bearer ${operatorToken}`)
+        .send({
+          clientId: 'tablet-01',
+          items: [
+            {
+              idempotencyKey: expiredKey,
+              farmerId: testFarmer.id,
+              centreId: testCentre.id,
+              crop: 'Soybean',
+              grade: 'Grade B',
+              grossWeight: 500.0,
+              tareWeight: 10.0,
+              moisture: 11.0,
+              clientDeviceTimestamp: new Date().toISOString(),
+              localCreationTimestamp: new Date().toISOString()
+            }
+          ]
+        });
+
+      expect(resExpired.status).toBe(200);
+      expect(resExpired.body.batchSummary.failedCount).toBe(1);
+      expect(resExpired.body.results[0].status).toBe('FAILED');
+      expect(resExpired.body.results[0].error).toMatch(/No applicable published daily price/i);
+
+      await prisma.priceBoard.delete({ where: { id: expiredPrice.id } });
+
+      // 3. Future-Dated Price: Procurement occurred on 2026-11-01, but rate is only effective in future (2099-01-01)
+      const futurePriceKey = `offline-future-price-${Date.now()}`;
+      const futurePriceRecord = await prisma.priceBoard.create({
+        data: {
+          crop: 'Tur',
+          grade: 'Grade B',
+          ratePerQuintal: 7500.00,
+          effectiveDate: '2099-01-01', // Far future date
+          publishedBy: 'System Test',
+          isActive: true
+        }
+      });
+
+      const resFuture = await request(app)
+        .post('/api/sync/batch')
+        .set('Authorization', `Bearer ${operatorToken}`)
+        .send({
+          clientId: 'tablet-01',
+          items: [
+            {
+              idempotencyKey: futurePriceKey,
+              farmerId: testFarmer.id,
+              centreId: testCentre.id,
+              crop: 'Tur',
+              grade: 'Grade B',
+              grossWeight: 500.0,
+              tareWeight: 10.0,
+              moisture: 11.0,
+              localCreationTimestamp: '2026-11-01T10:00:00.000Z' // Earlier than effective date
+            }
+          ]
+        });
+
+      expect(resFuture.status).toBe(200);
+      expect(resFuture.body.batchSummary.failedCount).toBe(1);
+      expect(resFuture.body.results[0].status).toBe('FAILED');
+      expect(resFuture.body.results[0].error).toMatch(/No applicable published daily price found.*on or before procurement date/i);
+
+      await prisma.priceBoard.delete({ where: { id: futurePriceRecord.id } });
     });
 
-    it('uses server database price when valid published price exists', async () => {
+    it('uses server database price when valid published price exists and applies latest applicable rate', async () => {
       const turPrice = await prisma.priceBoard.findFirst({
         where: { crop: 'Tur', grade: 'Grade A', isActive: true }
       });
