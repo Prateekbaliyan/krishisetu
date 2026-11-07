@@ -1,5 +1,11 @@
 # KrishiSetu — Technical Design Document (TDD)
 
+**GitHub Repository:** [https://github.com/Prateekbaliyan/krishisetu](https://github.com/Prateekbaliyan/krishisetu)  
+**Live Application URL:** [https://krishisetu-gules-nine.vercel.app/](https://krishisetu-gules-nine.vercel.app/)  
+**Backend API URL:** [https://krishisetu-aktz.onrender.com](https://krishisetu-aktz.onrender.com)  
+
+---
+
 ## 1. Executive Summary & Problem Context
 
 **Client:** Farmer Producer Company (FPC), Latur, Maharashtra  
@@ -93,7 +99,7 @@ flowchart TD
   - Logical bounds checking: Rejects scale values outside 0–50,000 kg and moisture outside 0–40%.
 - **Non-Fabrication Guarantee:** When `GEMINI_API_KEY` is unconfigured, or when image clarity is below 0.50 confidence, the system never fabricates readings. It explicitly reports unreadable status and logs a supervisor manual override.
 - **Independent Backend AI Mismatch Enforcement:**
-  - Tolerances: Scale difference $\le 2.0\text{ kg}$; Moisture difference $\le 0.5\%$.
+  - Tolerances: Scale difference ≤ 2.0 kg; Moisture difference ≤ 0.5%.
   - When manual entries differ from AI readings beyond tolerance, the backend strictly ignores client-supplied `aiVerificationStatus: 'MATCH'` bypass attempts.
   - Procurement creation is blocked with HTTP 403 unless an authenticated user with the `MANAGER` role approves the discrepancy with a mandatory non-empty review reason.
   - The manager's identity is strictly derived from the verified server-side JWT session (`req.user`), completely ignoring any client-supplied `managerId` to prevent identity spoofing by Centre Operators.
@@ -123,7 +129,7 @@ flowchart TD
 - **Formulas:**
   $$\text{Actual Weight} = \text{Gross Weight} - \text{Tare Weight}$$
   $$\text{Moisture Deduction \%} = \max(0, \text{Moisture} - 12) \times 1\%$$
-  $$\text{Net Weight} = \text{Actual Weight} \times \left(1 - \frac{\text{Deduction \%}}{100}\right)$$
+  $$\text{Net Weight} = \text{Actual Weight} \times \left(1 - \frac{\text{Moisture Deduction \%}}{100}\right)$$
   $$\text{Total Amount} = \frac{\text{Net Weight} \times \text{Rate per Quintal}}{100}$$
 - **Rounding Rules:** Weights are rounded to 1 decimal place (0.1 kg); monetary amounts are rounded to 2 decimal places (₹0.01).
 - **Validation Gates:** Gross weight must exceed tare weight; negative values and zero weights are rejected.
@@ -213,4 +219,14 @@ The repository features 60 automated tests across 5 test suites (100% passing):
 1. **Client-Side Hardware Time:** Local device timestamps on offline tablets are subject to device clock drift. The central server stamps `serverReceivedTimestamp` on all records as the official accounting receipt time.
 2. **Commercial Bank Format:** A generic mock NEFT/NACH bulk payment CSV format is provided. Specific commercial banks (e.g. SBI CMP, HDFC Enet) require custom CSV column mapping adapters for production live bank integrations.
 3. **Simulated SMS Gateway:** Simulated Marathi SMS delivery records message logs in the database. Production telecom deployment requires attaching an Indian DLT-approved SMS provider (e.g. Gupshup, ValueFirst, Airtel IQ).
+
+### 6.1. Future Improvements
+
+Based strictly on the documented operational limitations and agricultural field deployment constraints of the Latur FPC, the following roadmap enhancements are identified:
+
+1. **Commercial Bank Host-to-Host (H2H) Integration:** Upgrade the generic NEFT/NACH bulk payment CSV export to direct host-to-host SFTP/API banking integration (e.g., SBI Corporate Payment, HDFC Enet) with automated UTR return-file processing.
+2. **DLT-Registered Telecom SMS Delivery:** Transition the simulated Marathi SMS logger to production telecom SMS bindings (Gupshup, ValueFirst, or Airtel IQ) utilizing Indian DLT-registered templates for real-time transactional farmer SMS dispatch.
+3. **Hardware Weighbridge & Moisture Meter Direct Serial Intake:** Introduce WebUSB / Bluetooth Low Energy (BLE) serial communication with digital weighbridge indicators (e.g., Avery, Essae) and moisture meters, pairing automated digital intake with Gemini Vision OCR.
+4. **PWA Background Synchronization (`PeriodicSyncManager`):** Enhance the offline sync manager to leverage the Web Background Synchronization API, allowing queued procurement slips to drain autonomously in the background when network connectivity resumes.
+5. **Cryptographic Device Binding (Hardware Keystore):** Implement device-bound cryptographic key signing on collection centre Android tablets using WebAuthn / Android Keystore to provide hardware-level non-repudiation on offline-generated slips.
 

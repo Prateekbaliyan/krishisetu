@@ -1,6 +1,6 @@
 # KrishiSetu – Farmer Procurement & Payment Management System
 
-[![Build & Test](https://img.shields.io/badge/tests-44%20passed-success?style=flat-square)](.)
+[![Build & Test](https://img.shields.io/badge/tests-60%20passed-success?style=flat-square)](.)
 [![TypeScript](https://img.shields.io/badge/TypeScript-5.7-blue?style=flat-square&logo=typescript)](.)
 [![React](https://img.shields.io/badge/React-18.3-61dafb?style=flat-square&logo=react)](.)
 [![Node](https://img.shields.io/badge/Node.js-22%2B-green?style=flat-square&logo=nodedotjs)](.)
@@ -174,10 +174,10 @@ npm test
 
 ## 📚 Technical Documentation & Deployment Guides
 
-- 📘 [Technical Design Document (TDD)](./docs/TECHNICAL_DESIGN_DOCUMENT.md) — Detailed architecture, subsystem designs, mathematical formulas, and limitation analysis.
+- 📘 [Technical Design Document (TDD)](./docs/TECHNICAL_DESIGN_DOCUMENT.md) ([Download PDF](./docs/TDD.pdf)) — Detailed architecture, subsystem designs, mathematical formulas, and limitation analysis.
 - 🚀 [Production Deployment Guide](./docs/DEPLOYMENT.md) — Render, Vercel, Supabase PostgreSQL, environment variables, and Gemini API setup.
 - 📡 [API Documentation](./docs/API_DOCUMENTATION.md) — Complete REST endpoint specifications, request/response schemas, and error codes.
-- 🏗️ [System Architecture & Specifications](./docs/ARCHITECTURE.md) — Data flow diagrams, offline-first sync lifecycle, and security model.
+- 🏗️ [System Architecture & Specifications](./docs/TECHNICAL_DESIGN_DOCUMENT.md) — Data flow diagrams, offline-first sync lifecycle, and security model.
 
 ---
 
