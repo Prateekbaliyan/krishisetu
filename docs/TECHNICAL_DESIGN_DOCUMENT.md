@@ -27,7 +27,7 @@ KrishiSetu is an enterprise SaaS platform that bridges remote village collection
 | **Backend API** | Node.js, Express.js, TypeScript | Typed, lightweight REST services with transactional integrity |
 | **Database & ORM** | PostgreSQL (Supabase/Render) / SQLite (Local Dev), Prisma ORM | Dual schema support allowing zero-config local runs and scalable cloud SQL |
 | **Authentication** | JWT, bcryptjs | Stateless, role-based access control with fail-fast production secret validation |
-| **AI Vision OCR** | Google Gemini Vision API (`gemini-1.5-flash`) | Actual multimodal image analysis for electronic weighing scale & moisture meter displays |
+| **AI Vision OCR** | Google Gemini Vision API (`gemini-3.5-flash-lite`) | Actual multimodal image analysis for electronic weighing scale & moisture meter displays |
 | **Automated Testing** | Vitest, Supertest | Fast unit and end-to-end integration test execution (44 passing automated tests) |
 
 ---
@@ -85,7 +85,7 @@ flowchart TD
 ### 4.1. Gemini Vision API Integration & Discrepancy Gate
 
 - **Module:** `server/src/lib/visionService.ts`
-- **Supported Models:** Configurable via `GEMINI_MODEL` (default: `gemini-1.5-flash`).
+- **Supported Models:** Configurable via `GEMINI_MODEL` (default: `gemini-3.5-flash-lite`).
 - **Prompt Architecture:** Specialized prompt instructing the model to extract gross weight (kg) or moisture (%), unit, confidence score (0.00–1.00), readability flag, and notes regarding glare/angle.
 - **Fail-Safe & Rate Limit Resilience:**
   - 15-second `AbortController` timeout prevents request hanging during network latency.

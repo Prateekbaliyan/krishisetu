@@ -18,14 +18,13 @@ async function generateUniqueSlipNumber(centreCode: string): Promise<string> {
   const count = await prisma.purchase.count({
     where: { centre: { code: centreCode } }
   });
-  const randomSuffix = Math.floor(100 + Math.random() * 900);
-  const baseNum = 24500 + count + 1;
-  const slip = `${centreCode}-${baseNum}`;
+  let slip = `${centreCode}-${24500 + count + 1}`;
+  let attempt = 0;
 
-  // Check collision just in case
-  const exists = await prisma.purchase.findUnique({ where: { slipNumber: slip } });
-  if (exists) {
-    return `${centreCode}-${baseNum}${randomSuffix}`;
+  while (await prisma.purchase.findUnique({ where: { slipNumber: slip } })) {
+    attempt++;
+    const randomSuffix = Math.floor(1000 + Math.random() * 9000);
+    slip = `${centreCode}-${24500 + count + attempt}${randomSuffix}`;
   }
   return slip;
 }
@@ -223,40 +222,12 @@ router.post('/', authenticateToken, async (req, res) => {
     let reviewNotes: string | null = null;
 
     if (hasAiMismatch) {
-      const isManagerActor = req.user?.role === 'MANAGER';
-
-      if (isManagerActor) {
-        reviewerId = req.user!.id;
-        reviewedBy = req.user!.fullName;
-        reviewDecision = 'APPROVE';
-        reviewedAt = new Date();
-        reviewNotes = req.body.reviewNotes || 'Manager directly reviewed and approved AI reading variance.';
-      } else if (managerApproval && managerApproval.managerId && managerApproval.decision === 'APPROVE') {
-        const managerUser = await prisma.user.findFirst({
-          where: { id: managerApproval.managerId, role: 'MANAGER' }
-        });
-        if (!managerUser) {
-          return res.status(403).json({
-            success: false,
-            error: 'Invalid or inactive Office Manager authorization for AI mismatch approval.'
-          });
-        }
-        if (!managerApproval.reason || managerApproval.reason.trim() === '') {
-          return res.status(400).json({
-            success: false,
-            error: 'Manager review reason is required to approve an AI measurement discrepancy.'
-          });
-        }
-        reviewerId = managerUser.id;
-        reviewedBy = managerUser.fullName;
-        reviewDecision = 'APPROVE';
-        reviewedAt = new Date();
-        reviewNotes = managerApproval.reason;
-      } else {
-        // Block operator from bypassing mismatch without verified manager approval!
+      // 1. Strict Server-Side Identity Check: Only authenticated users with MANAGER role can approve an AI discrepancy
+      if (req.user?.role !== 'MANAGER') {
+        // Strictly reject Centre Operators or non-managers, even if a valid managerId is supplied in the request body
         return res.status(403).json({
           success: false,
-          error: `AI measurement mismatch detected beyond allowed tolerance. Procurement creation blocked until reviewed and approved by an authorized Office Manager. ${mismatchReasons.join(' ')}`,
+          error: `AI measurement mismatch detected beyond allowed tolerance. Procurement creation blocked until reviewed and approved by an authenticated Office Manager. ${mismatchReasons.join(' ')}`,
           requiresManagerApproval: true,
           mismatchDetails: {
             scaleDiff,
@@ -266,6 +237,22 @@ router.post('/', authenticateToken, async (req, res) => {
           }
         });
       }
+
+      // 2. An authenticated MANAGER is approving. Require a non-empty review reason
+      const reason = (req.body.reviewNotes || req.body.reviewReason || req.body.managerApproval?.reason || req.body.notes || '').trim();
+      if (!reason) {
+        return res.status(400).json({
+          success: false,
+          error: 'A non-empty review reason is required for an Office Manager to approve an AI measurement discrepancy.'
+        });
+      }
+
+      // 3. Derive manager identity strictly from server-side verified JWT session (never trust client payload IDs)
+      reviewerId = req.user.id;
+      reviewedBy = req.user.fullName;
+      reviewDecision = 'APPROVE';
+      reviewedAt = new Date();
+      reviewNotes = reason;
     }
 
     // 5. Mathematical Calculations
@@ -277,7 +264,7 @@ router.post('/', authenticateToken, async (req, res) => {
     });
 
     // 6. Generate Unique Slip Number
-    const slipNumber = await generateUniqueSlipNumber(centre.code);
+    let slipNumber = await generateUniqueSlipNumber(centre.code);
 
     // 7. Run Automated Anomaly Detection
     const anomalyCheck = await detectAnomalies(prisma, {
@@ -303,48 +290,61 @@ router.post('/', authenticateToken, async (req, res) => {
       status = 'PENDING_APPROVAL';
     }
 
-    const purchase = await prisma.purchase.create({
-      data: {
-        slipNumber,
-        idempotencyKey: key,
-        farmerId: farmer.id,
-        centreId: centre.id,
-        crop: selectedCrop,
-        grade: selectedGrade,
-        grossWeight: Math.round(numGross * 10) / 10,
-        tareWeight: Math.round(Number(tareWeight) * 10) / 10,
-        actualWeight: calcResult.actualWeight,
-        moisture: Math.round(numMoisture * 10) / 10,
-        moistureDeductionPercent: calcResult.moistureDeductionPercent,
-        netWeight: calcResult.netWeight,
-        ratePerQuintal: appliedRate,
-        totalAmount: calcResult.totalAmount,
-        status,
-        scalePhotoUrl: scalePhotoUrl || null,
-        moisturePhotoUrl: moisturePhotoUrl || null,
-        scaleAiWeight: aiScale,
-        moistureAiValue: aiMoist,
-        aiConfidence: aiConfidence ? Number(aiConfidence) : null,
-        aiVerificationStatus: computedAiStatus,
-        aiDiffNotes: aiDiffNotes || (hasAiMismatch ? mismatchReasons.join('; ') : null),
-        reviewerId,
-        reviewDecision,
-        reviewedBy,
-        reviewedAt,
-        reviewNotes,
-        clientDeviceTimestamp: clientDeviceTimestamp ? new Date(clientDeviceTimestamp) : null,
-        localCreationTimestamp: localCreationTimestamp ? new Date(localCreationTimestamp) : null,
-        serverReceivedTimestamp: new Date(),
-        syncStatus: 'SYNCED',
-        paymentEligibility: !isFlagged && farmer.bankVerificationStatus === 'VERIFIED',
-        isFlagged,
-        flagReason
-      },
-      include: {
-        farmer: true,
-        centre: true
+    let purchase: any = null;
+    let attempts = 0;
+    while (!purchase && attempts < 5) {
+      try {
+        purchase = await prisma.purchase.create({
+          data: {
+            slipNumber,
+            idempotencyKey: key,
+            farmerId: farmer.id,
+            centreId: centre.id,
+            crop: selectedCrop,
+            grade: selectedGrade,
+            grossWeight: Math.round(numGross * 10) / 10,
+            tareWeight: Math.round(Number(tareWeight) * 10) / 10,
+            actualWeight: calcResult.actualWeight,
+            moisture: Math.round(numMoisture * 10) / 10,
+            moistureDeductionPercent: calcResult.moistureDeductionPercent,
+            netWeight: calcResult.netWeight,
+            ratePerQuintal: appliedRate,
+            totalAmount: calcResult.totalAmount,
+            status,
+            scalePhotoUrl: scalePhotoUrl || null,
+            moisturePhotoUrl: moisturePhotoUrl || null,
+            scaleAiWeight: aiScale,
+            moistureAiValue: aiMoist,
+            aiConfidence: aiConfidence ? Number(aiConfidence) : null,
+            aiVerificationStatus: computedAiStatus,
+            aiDiffNotes: aiDiffNotes || (hasAiMismatch ? mismatchReasons.join('; ') : null),
+            reviewerId,
+            reviewDecision,
+            reviewedBy,
+            reviewedAt,
+            reviewNotes,
+            clientDeviceTimestamp: clientDeviceTimestamp ? new Date(clientDeviceTimestamp) : null,
+            localCreationTimestamp: localCreationTimestamp ? new Date(localCreationTimestamp) : null,
+            serverReceivedTimestamp: new Date(),
+            syncStatus: 'SYNCED',
+            paymentEligibility: !isFlagged && farmer.bankVerificationStatus === 'VERIFIED',
+            isFlagged,
+            flagReason
+          },
+          include: {
+            farmer: true,
+            centre: true
+          }
+        });
+      } catch (createErr: any) {
+        if (createErr.code === 'P2002' && attempts < 4) {
+          attempts++;
+          slipNumber = `${centre.code}-${24500 + Math.floor(Math.random() * 100000)}`;
+          continue;
+        }
+        throw createErr;
       }
-    });
+    }
 
     // Create Anomaly Flags if detected
     if (anomalyCheck.isFlagged) {
@@ -559,10 +559,15 @@ router.get('/:slipNumber', authenticateToken, async (req, res) => {
 router.post('/:id/review', authenticateToken, requireRole(['MANAGER']), async (req, res) => {
   try {
     const { id } = req.params;
-    const { decision, notes } = req.body; // decision: "APPROVE" | "REJECT"
+    const { decision, notes, reviewNotes, reason } = req.body; // decision: "APPROVE" | "REJECT"
 
     if (!decision || (decision !== 'APPROVE' && decision !== 'REJECT')) {
       return res.status(400).json({ success: false, error: "Decision must be 'APPROVE' or 'REJECT'." });
+    }
+
+    const reviewReason = (notes || reviewNotes || reason || '').trim();
+    if (!reviewReason) {
+      return res.status(400).json({ success: false, error: 'A non-empty review reason is required to review a purchase.' });
     }
 
     const purchase = await prisma.purchase.findUnique({
@@ -588,7 +593,7 @@ router.post('/:id/review', authenticateToken, requireRole(['MANAGER']), async (r
         reviewDecision: decision,
         reviewedBy: req.user!.fullName,
         reviewedAt: new Date(),
-        reviewNotes: notes || `Manager ${req.user!.fullName} ${decision.toLowerCase()}d purchase.`
+        reviewNotes: reviewReason
       }
     });
 
@@ -598,7 +603,7 @@ router.post('/:id/review', authenticateToken, requireRole(['MANAGER']), async (r
       data: {
         status: decision === 'APPROVE' ? 'REVIEWED_APPROVED' : 'REVIEWED_REJECTED',
         reviewedBy: req.user!.fullName,
-        reviewNotes: notes || undefined
+        reviewNotes: reviewReason
       }
     });
 
@@ -614,7 +619,7 @@ router.post('/:id/review', authenticateToken, requireRole(['MANAGER']), async (r
         previousStatus: purchase.status,
         newStatus,
         decision,
-        notes
+        notes: reviewReason
       }
     });
 

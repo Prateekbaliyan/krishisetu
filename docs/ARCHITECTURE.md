@@ -98,7 +98,7 @@ Three automated algorithmic surveillance checks run on every intake before appro
 
 ## 4. Vision AI Scale & Moisture Meter OCR
 
-- **Configurable Provider Architecture:** Uses Google's Gemini Vision API (`gemini-1.5-flash`) when `GEMINI_API_KEY` is configured, with a configurable mock fallback provider for deterministic testing.
+- **Configurable Provider Architecture:** Uses Google's Gemini Vision API (`gemini-3.5-flash-lite`) when `GEMINI_API_KEY` is configured, with a configurable mock fallback provider for deterministic testing.
 - **Strict Non-Fabrication Policy:** The system never fabricates OCR results if an image is unreadable, blurry, or if the API key is missing. It explicitly returns unconfigured/failed status and records a supervisor manual verification audit entry.
 - **Discrepancy Resolution:** Compares AI-extracted numeric readings against manual inputs:
   - Allowed scale tolerance: $\pm 2.0\text{ kg}$

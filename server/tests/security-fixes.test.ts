@@ -13,6 +13,7 @@ describe('KrishiSetu Security, Hardening & Compliance Verification Suite', () =>
   let managerToken: string;
   let operatorUser: any;
   let managerUser: any;
+  let anotherManagerUser: any;
   let testCentre: any;
   let anotherCentre: any;
   let testFarmer: any;
@@ -31,6 +32,23 @@ describe('KrishiSetu Security, Hardening & Compliance Verification Suite', () =>
 
     expect(operatorUser).toBeDefined();
     expect(managerUser).toBeDefined();
+
+    // Seed or find another manager for identity override test
+    anotherManagerUser = await prisma.user.findFirst({
+      where: { role: 'MANAGER', id: { not: managerUser.id } }
+    });
+
+    if (!anotherManagerUser) {
+      anotherManagerUser = await prisma.user.create({
+        data: {
+          email: 'regional.manager@krishisetu.in',
+          passwordHash: managerUser.passwordHash,
+          fullName: 'Regional Review Manager',
+          role: 'MANAGER',
+          centreId: null
+        }
+      });
+    }
 
     // Ensure operator is assigned to C07
     await prisma.user.update({
@@ -65,7 +83,7 @@ describe('KrishiSetu Security, Hardening & Compliance Verification Suite', () =>
   });
 
   beforeEach(() => {
-    // Always generate valid tokens for current tests
+    // Generate valid tokens for each test
     operatorToken = signJwtToken({
       id: operatorUser.id,
       email: operatorUser.email,
@@ -126,37 +144,13 @@ describe('KrishiSetu Security, Hardening & Compliance Verification Suite', () =>
     });
   });
 
-  // 2. AI Mismatch Backend Enforcement
-  describe('2. AI Mismatch Backend Enforcement', () => {
-    it('blocks operator procurement creation when AI scale weight mismatch exceeds tolerance', async () => {
+  // 2. Manager Approval Security & AI Mismatch Gating
+  describe('2. Manager Approval Security & AI Mismatch Gating', () => {
+    it('rejects approval when Centre Operator submits a manager ID in payload', async () => {
       const grossWeight = 1500.0;
       const mismatchedAiScale = 1450.0; // 50kg diff >> 2.0kg tolerance
 
-      const res = await request(app)
-        .post('/api/purchases')
-        .set('Authorization', `Bearer ${operatorToken}`)
-        .send({
-          farmerId: testFarmer.id,
-          centreId: testCentre.id,
-          crop: 'Soybean',
-          grade: 'Grade A',
-          grossWeight,
-          tareWeight: 15.0,
-          moisture: 11.5,
-          scaleAiWeight: mismatchedAiScale,
-          aiVerificationStatus: 'MATCH' // Attempted client bypass!
-        });
-
-      expect(res.status).toBe(403);
-      expect(res.body.success).toBe(false);
-      expect(res.body.requiresManagerApproval).toBe(true);
-      expect(res.body.error).toMatch(/AI measurement mismatch detected/i);
-    });
-
-    it('allows procurement creation when authorized Manager approval is provided for AI variance', async () => {
-      const grossWeight = 1500.0;
-      const mismatchedAiScale = 1450.0;
-
+      // Centre Operator attempts to bypass AI mismatch by supplying managerUser.id
       const res = await request(app)
         .post('/api/purchases')
         .set('Authorization', `Bearer ${operatorToken}`)
@@ -172,8 +166,52 @@ describe('KrishiSetu Security, Hardening & Compliance Verification Suite', () =>
           managerApproval: {
             managerId: managerUser.id,
             decision: 'APPROVE',
-            reason: 'Supervisor inspected digital display glare and confirmed 1500kg tare calibrated.'
+            reason: 'Forged operator note claiming manager approval'
           }
+        });
+
+      expect(res.status).toBe(403);
+      expect(res.body.success).toBe(false);
+      expect(res.body.requiresManagerApproval).toBe(true);
+      expect(res.body.error).toMatch(/Procurement creation blocked until reviewed and approved by an authenticated Office Manager/i);
+    });
+
+    it('rejects approval attempt from unauthenticated user', async () => {
+      const res = await request(app)
+        .post('/api/purchases')
+        .send({
+          farmerId: testFarmer.id,
+          centreId: testCentre.id,
+          crop: 'Soybean',
+          grade: 'Grade A',
+          grossWeight: 1500.0,
+          tareWeight: 15.0,
+          moisture: 11.5,
+          scaleAiWeight: 1450.0
+        });
+
+      expect(res.status).toBe(401);
+      expect(res.body.success).toBe(false);
+      expect(res.body.error).toMatch(/Authentication required/i);
+    });
+
+    it('accepts approval when authenticated MANAGER approves with a non-empty reason', async () => {
+      const grossWeight = 1500.0;
+      const mismatchedAiScale = 1450.0;
+
+      const res = await request(app)
+        .post('/api/purchases')
+        .set('Authorization', `Bearer ${managerToken}`)
+        .send({
+          farmerId: testFarmer.id,
+          centreId: testCentre.id,
+          crop: 'Soybean',
+          grade: 'Grade A',
+          grossWeight,
+          tareWeight: 15.0,
+          moisture: 11.5,
+          scaleAiWeight: mismatchedAiScale,
+          reviewReason: 'Supervisor checked weighing scale tare calibration and verified 1500kg gross.'
         });
 
       expect(res.status).toBe(201);
@@ -181,11 +219,280 @@ describe('KrishiSetu Security, Hardening & Compliance Verification Suite', () =>
       expect(res.body.purchase.reviewedBy).toBe(managerUser.fullName);
       expect(res.body.purchase.reviewerId).toBe(managerUser.id);
       expect(res.body.purchase.reviewDecision).toBe('APPROVE');
+      expect(res.body.purchase.reviewNotes).toContain('Supervisor checked weighing scale tare calibration');
+    });
+
+    it('rejects Manager approval when review reason is empty or whitespace-only', async () => {
+      const grossWeight = 1500.0;
+      const mismatchedAiScale = 1450.0;
+
+      const res = await request(app)
+        .post('/api/purchases')
+        .set('Authorization', `Bearer ${managerToken}`)
+        .send({
+          farmerId: testFarmer.id,
+          centreId: testCentre.id,
+          crop: 'Soybean',
+          grade: 'Grade A',
+          grossWeight,
+          tareWeight: 15.0,
+          moisture: 11.5,
+          scaleAiWeight: mismatchedAiScale,
+          reviewReason: '   ' // Empty whitespace
+        });
+
+      expect(res.status).toBe(400);
+      expect(res.body.success).toBe(false);
+      expect(res.body.error).toMatch(/A non-empty review reason is required/i);
+    });
+
+    it('ensures client-supplied manager ID cannot override authenticated manager identity', async () => {
+      const grossWeight = 1200.0;
+      const mismatchedAiScale = 1150.0;
+
+      // Authenticated as managerUser, but payload passes anotherManagerUser.id
+      const res = await request(app)
+        .post('/api/purchases')
+        .set('Authorization', `Bearer ${managerToken}`)
+        .send({
+          farmerId: testFarmer.id,
+          centreId: testCentre.id,
+          crop: 'Soybean',
+          grade: 'Grade A',
+          grossWeight,
+          tareWeight: 15.0,
+          moisture: 11.5,
+          scaleAiWeight: mismatchedAiScale,
+          managerApproval: {
+            managerId: anotherManagerUser.id, // Attempted spoof of another manager
+            reason: 'Legitimate manager review from logged-in manager'
+          }
+        });
+
+      expect(res.status).toBe(201);
+      expect(res.body.success).toBe(true);
+      // Reviewer ID MUST be derived strictly from server-side JWT session, NOT payload!
+      expect(res.body.purchase.reviewerId).toBe(managerUser.id);
+      expect(res.body.purchase.reviewerId).not.toBe(anotherManagerUser.id);
+      expect(res.body.purchase.reviewedBy).toBe(managerUser.fullName);
+    });
+
+    it('ensures offline sync mismatch cannot bypass manager review', async () => {
+      const syncKey = `offline-mismatch-test-${Date.now()}`;
+      const res = await request(app)
+        .post('/api/sync/batch')
+        .set('Authorization', `Bearer ${operatorToken}`)
+        .send({
+          clientId: 'tablet-device-01',
+          items: [
+            {
+              idempotencyKey: syncKey,
+              clientId: 'tablet-device-01',
+              farmerId: testFarmer.id,
+              centreId: testCentre.id,
+              crop: 'Soybean',
+              grade: 'Grade A',
+              grossWeight: 1500.0,
+              tareWeight: 15.0,
+              moisture: 11.5,
+              scaleAiWeight: 1400.0, // 100kg difference >> tolerance
+              aiVerificationStatus: 'MATCH', // Attempted bypass
+              clientDeviceTimestamp: new Date().toISOString(),
+              localCreationTimestamp: new Date().toISOString()
+            }
+          ]
+        });
+
+      expect(res.status).toBe(200);
+      expect(res.body.batchSummary.syncedCount).toBe(1);
+
+      // Verify the synced purchase is FLAGGED in database, ineligible for payment, with no manager reviewer
+      const purchase = await prisma.purchase.findUnique({
+        where: { idempotencyKey: syncKey }
+      });
+      expect(purchase).toBeDefined();
+      expect(purchase!.isFlagged).toBe(true);
+      expect(purchase!.status).toBe('FLAGGED');
+      expect(purchase!.paymentEligibility).toBe(false);
+      expect(purchase!.reviewerId).toBeNull();
+      expect(purchase!.flagReason).toMatch(/AI Measurement Mismatch/i);
     });
   });
 
-  // 3. Central Published Daily Price Validation
-  describe('3. Procurement Daily Price Validation', () => {
+  // 3. Offline Sync Pricing Hardening
+  describe('3. Offline Sync Pricing Hardening', () => {
+    it('ignores fake client price and strictly applies central database price', async () => {
+      const activePrice = await prisma.priceBoard.findFirst({
+        where: { crop: 'Soybean', grade: 'Grade A', isActive: true }
+      });
+      expect(activePrice).toBeDefined();
+
+      const syncKey = `offline-price-fake-${Date.now()}`;
+      const fakePrice = 99999.00;
+
+      const res = await request(app)
+        .post('/api/sync/batch')
+        .set('Authorization', `Bearer ${operatorToken}`)
+        .send({
+          clientId: 'tablet-01',
+          items: [
+            {
+              idempotencyKey: syncKey,
+              clientId: 'tablet-01',
+              farmerId: testFarmer.id,
+              centreId: testCentre.id,
+              crop: 'Soybean',
+              grade: 'Grade A',
+              grossWeight: 500.0,
+              tareWeight: 10.0,
+              moisture: 11.0,
+              ratePerQuintal: fakePrice, // Fake rate from client
+              clientDeviceTimestamp: new Date().toISOString(),
+              localCreationTimestamp: new Date().toISOString()
+            }
+          ]
+        });
+
+      expect(res.status).toBe(200);
+      expect(res.body.batchSummary.syncedCount).toBe(1);
+
+      const purchase = await prisma.purchase.findUnique({
+        where: { idempotencyKey: syncKey }
+      });
+      expect(purchase).toBeDefined();
+      expect(purchase!.ratePerQuintal).toBe(activePrice!.ratePerQuintal);
+      expect(purchase!.ratePerQuintal).not.toBe(fakePrice);
+    });
+
+    it('rejects sync record when no active published price exists for the crop', async () => {
+      const syncKey = `offline-no-price-${Date.now()}`;
+
+      const res = await request(app)
+        .post('/api/sync/batch')
+        .set('Authorization', `Bearer ${operatorToken}`)
+        .send({
+          clientId: 'tablet-01',
+          items: [
+            {
+              idempotencyKey: syncKey,
+              clientId: 'tablet-01',
+              farmerId: testFarmer.id,
+              centreId: testCentre.id,
+              crop: 'Wheat', // Unpublished / unsupported crop
+              grade: 'Grade A',
+              grossWeight: 500.0,
+              tareWeight: 10.0,
+              moisture: 11.0,
+              clientDeviceTimestamp: new Date().toISOString(),
+              localCreationTimestamp: new Date().toISOString()
+            }
+          ]
+        });
+
+      expect(res.status).toBe(200);
+      expect(res.body.batchSummary.syncedCount).toBe(0);
+      expect(res.body.batchSummary.failedCount).toBe(1);
+      expect(res.body.results[0].status).toBe('FAILED');
+      expect(res.body.results[0].error).toMatch(/Invalid or unsupported crop|No active published daily price/i);
+
+      // Verify no record was created in database
+      const purchase = await prisma.purchase.findUnique({
+        where: { idempotencyKey: syncKey }
+      });
+      expect(purchase).toBeNull();
+    });
+
+    it('uses server database price when valid published price exists', async () => {
+      const turPrice = await prisma.priceBoard.findFirst({
+        where: { crop: 'Tur', grade: 'Grade A', isActive: true }
+      });
+      expect(turPrice).toBeDefined();
+
+      const syncKey = `offline-tur-price-${Date.now()}`;
+
+      const res = await request(app)
+        .post('/api/sync/batch')
+        .set('Authorization', `Bearer ${operatorToken}`)
+        .send({
+          clientId: 'tablet-01',
+          items: [
+            {
+              idempotencyKey: syncKey,
+              clientId: 'tablet-01',
+              farmerId: testFarmer.id,
+              centreId: testCentre.id,
+              crop: 'Tur',
+              grade: 'Grade A',
+              grossWeight: 400.0,
+              tareWeight: 10.0,
+              moisture: 10.0,
+              clientDeviceTimestamp: new Date().toISOString(),
+              localCreationTimestamp: new Date().toISOString()
+            }
+          ]
+        });
+
+      expect(res.status).toBe(200);
+      expect(res.body.batchSummary.syncedCount).toBe(1);
+
+      const purchase = await prisma.purchase.findUnique({
+        where: { idempotencyKey: syncKey }
+      });
+      expect(purchase).toBeDefined();
+      expect(purchase!.ratePerQuintal).toBe(turPrice!.ratePerQuintal);
+    });
+
+    it('retried sync request does not create duplicate procurement entries', async () => {
+      const testKey = `test-offline-retry-${Date.now()}`;
+      const batchPayload = {
+        clientId: 'tablet-device-retry',
+        items: [
+          {
+            idempotencyKey: testKey,
+            clientId: 'tablet-device-retry',
+            farmerId: testFarmer.id,
+            centreId: testCentre.id,
+            crop: 'Soybean',
+            grade: 'Grade A',
+            grossWeight: 600.0,
+            tareWeight: 10.0,
+            moisture: 11.5,
+            clientDeviceTimestamp: new Date().toISOString(),
+            localCreationTimestamp: new Date().toISOString()
+          }
+        ]
+      };
+
+      // First sync
+      const res1 = await request(app)
+        .post('/api/sync/batch')
+        .set('Authorization', `Bearer ${operatorToken}`)
+        .send(batchPayload);
+
+      expect(res1.status).toBe(200);
+      expect(res1.body.batchSummary.syncedCount).toBe(1);
+      expect(res1.body.batchSummary.duplicateCount).toBe(0);
+
+      // Retried sync with exact same idempotencyKey
+      const res2 = await request(app)
+        .post('/api/sync/batch')
+        .set('Authorization', `Bearer ${operatorToken}`)
+        .send(batchPayload);
+
+      expect(res2.status).toBe(200);
+      expect(res2.body.batchSummary.syncedCount).toBe(0);
+      expect(res2.body.batchSummary.duplicateCount).toBe(1);
+
+      // Verify count remains strictly 1
+      const count = await prisma.purchase.count({
+        where: { idempotencyKey: testKey }
+      });
+      expect(count).toBe(1);
+    });
+  });
+
+  // 4. Online Procurement Price Validation
+  describe('4. Online Procurement Price Validation', () => {
     it('completely ignores client-supplied rate and strictly applies central published daily price', async () => {
       const activePrice = await prisma.priceBoard.findFirst({
         where: { crop: 'Soybean', grade: 'Grade A', isActive: true }
@@ -234,8 +541,8 @@ describe('KrishiSetu Security, Hardening & Compliance Verification Suite', () =>
     });
   });
 
-  // 4. Collection Centre Access Boundaries
-  describe('4. Collection Centre Authorization Boundaries', () => {
+  // 5. Collection Centre Access Boundaries
+  describe('5. Collection Centre Authorization Boundaries', () => {
     it('blocks operator from creating a purchase for a collection centre other than assigned centre', async () => {
       const res = await request(app)
         .post('/api/purchases')
@@ -253,6 +560,34 @@ describe('KrishiSetu Security, Hardening & Compliance Verification Suite', () =>
       expect(res.status).toBe(403);
       expect(res.body.success).toBe(false);
       expect(res.body.error).toMatch(/Operators cannot submit purchases for other collection centres/i);
+    });
+
+    it('blocks operator from syncing purchases for a collection centre other than assigned centre', async () => {
+      const res = await request(app)
+        .post('/api/sync/batch')
+        .set('Authorization', `Bearer ${operatorToken}`)
+        .send({
+          clientId: 'tablet-01',
+          items: [
+            {
+              idempotencyKey: `unauthorized-centre-sync-${Date.now()}`,
+              clientId: 'tablet-01',
+              farmerId: testFarmer.id,
+              centreId: anotherCentre.id, // Unauthorized centre!
+              crop: 'Soybean',
+              grade: 'Grade A',
+              grossWeight: 400.0,
+              tareWeight: 10.0,
+              moisture: 11.0,
+              clientDeviceTimestamp: new Date().toISOString(),
+              localCreationTimestamp: new Date().toISOString()
+            }
+          ]
+        });
+
+      expect(res.status).toBe(200);
+      expect(res.body.batchSummary.failedCount).toBe(1);
+      expect(res.body.results[0].error).toMatch(/Operators cannot sync procurement records for another collection centre/i);
     });
 
     it('blocks operator from accessing a purchase slip from another collection centre', async () => {
@@ -279,54 +614,6 @@ describe('KrishiSetu Security, Hardening & Compliance Verification Suite', () =>
       expect(res.status).toBe(403);
       expect(res.body.success).toBe(false);
       expect(res.body.error).toMatch(/Access denied: You do not have permission/i);
-    });
-  });
-
-  // 5. Offline Sync Idempotency & Duplicate Prevention
-  describe('5. Offline Sync Idempotency & Duplicate Prevention', () => {
-    it('does not create duplicate purchase on repeated offline sync submissions', async () => {
-      const testKey = `test-offline-idempotency-${Date.now()}`;
-      const batchPayload = {
-        clientId: 'test-device-tablet-01',
-        items: [
-          {
-            idempotencyKey: testKey,
-            clientId: 'test-device-tablet-01',
-            farmerId: testFarmer.id,
-            centreId: testCentre.id,
-            crop: 'Soybean',
-            grade: 'Grade A',
-            grossWeight: 600.0,
-            tareWeight: 10.0,
-            moisture: 11.5,
-            clientDeviceTimestamp: new Date().toISOString(),
-            localCreationTimestamp: new Date().toISOString()
-          }
-        ]
-      };
-
-      const res1 = await request(app)
-        .post('/api/sync/batch')
-        .set('Authorization', `Bearer ${operatorToken}`)
-        .send(batchPayload);
-
-      expect(res1.status).toBe(200);
-      expect(res1.body.batchSummary.syncedCount).toBe(1);
-      expect(res1.body.batchSummary.duplicateCount).toBe(0);
-
-      const res2 = await request(app)
-        .post('/api/sync/batch')
-        .set('Authorization', `Bearer ${operatorToken}`)
-        .send(batchPayload);
-
-      expect(res2.status).toBe(200);
-      expect(res2.body.batchSummary.syncedCount).toBe(0);
-      expect(res2.body.batchSummary.duplicateCount).toBe(1);
-
-      const count = await prisma.purchase.count({
-        where: { idempotencyKey: testKey }
-      });
-      expect(count).toBe(1);
     });
   });
 

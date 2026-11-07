@@ -11,13 +11,13 @@ async function generateUniqueSlipNumber(centreCode: string): Promise<string> {
   const count = await prisma.purchase.count({
     where: { centre: { code: centreCode } }
   });
-  const randomSuffix = Math.floor(100 + Math.random() * 900);
-  const baseNum = 24500 + count + 1;
-  const slip = `${centreCode}-${baseNum}`;
+  let slip = `${centreCode}-${24500 + count + 1}`;
+  let attempt = 0;
 
-  const exists = await prisma.purchase.findUnique({ where: { slipNumber: slip } });
-  if (exists) {
-    return `${centreCode}-${baseNum}${randomSuffix}`;
+  while (await prisma.purchase.findUnique({ where: { slipNumber: slip } })) {
+    attempt++;
+    const randomSuffix = Math.floor(1000 + Math.random() * 9000);
+    slip = `${centreCode}-${24500 + count + attempt}${randomSuffix}`;
   }
   return slip;
 }
@@ -118,21 +118,38 @@ router.post('/batch', authenticateToken, async (req, res) => {
           throw new Error(`Farmer ID ${item.farmerId} not found in central registry.`);
         }
 
-        // 3. Validate Centre
+        // 3. Validate Centre & Enforce Operator Access Boundary
+        if (req.user?.role === 'OPERATOR' && req.user.centreId && item.centreId !== req.user.centreId) {
+          throw new Error('Access denied: Operators cannot sync procurement records for another collection centre.');
+        }
+
         const centre = await prisma.collectionCentre.findUnique({ where: { id: item.centreId } });
         if (!centre) {
           throw new Error(`Collection centre ${item.centreId} not found.`);
         }
 
-        // 4. Central Published Price Validation
-        const crop = item.crop || 'Soybean';
+        // 4. Central Published Daily Price Validation (Zero Trust for Client Price)
+        const crop = item.crop;
         const grade = item.grade || 'Grade A';
+
+        if (!crop || (crop !== 'Soybean' && crop !== 'Tur')) {
+          throw new Error(`Invalid or unsupported crop: ${crop || 'unspecified'}. Supported crops: Soybean, Tur.`);
+        }
+
         const activePrice = await prisma.priceBoard.findFirst({
-          where: { crop, grade, isActive: true }
+          where: {
+            crop,
+            grade,
+            isActive: true
+          }
         });
 
-        // Use central active rate if available, or validate client rate against active policy
-        const appliedRate = activePrice ? activePrice.ratePerQuintal : Number(item.ratePerQuintal || 4850);
+        if (!activePrice) {
+          throw new Error(`No active published daily price found for ${crop} (${grade}). Offline purchase cannot be synced until Office Manager publishes daily rates.`);
+        }
+
+        // Server-enforced rate: Never trust client-supplied rate or fall back to hardcoded numbers!
+        const appliedRate = activePrice.ratePerQuintal;
 
         // 5. Server-Side Independent Math Calculation (prevents client tamper)
         const numGross = Number(item.grossWeight);
@@ -167,7 +184,7 @@ router.post('/batch', authenticateToken, async (req, res) => {
         }
 
         // 7. Generate Unique Slip Number
-        const slipNumber = await generateUniqueSlipNumber(centre.code);
+        let slipNumber = await generateUniqueSlipNumber(centre.code);
 
         // 8. Anomaly Detection
         const anomalyCheck = await detectAnomalies(prisma, {
@@ -192,39 +209,52 @@ router.post('/batch', authenticateToken, async (req, res) => {
         const flagReason = isFlagged ? flagReasons.join('; ') : null;
         const status = isFlagged ? 'FLAGGED' : 'PENDING_APPROVAL';
 
-        const purchase = await prisma.purchase.create({
-          data: {
-            slipNumber,
-            idempotencyKey: key,
-            farmerId: farmer.id,
-            centreId: centre.id,
-            crop,
-            grade,
-            grossWeight: Math.round(numGross * 10) / 10,
-            tareWeight: Math.round(numTare * 10) / 10,
-            actualWeight: calcResult.actualWeight,
-            moisture: Math.round(numMoisture * 10) / 10,
-            moistureDeductionPercent: calcResult.moistureDeductionPercent,
-            netWeight: calcResult.netWeight,
-            ratePerQuintal: appliedRate,
-            totalAmount: calcResult.totalAmount,
-            status,
-            scalePhotoUrl: item.scalePhotoUrl || null,
-            moisturePhotoUrl: item.moisturePhotoUrl || null,
-            scaleAiWeight: item.scaleAiWeight || null,
-            moistureAiValue: item.moistureAiValue || null,
-            aiConfidence: item.aiConfidence || null,
-            aiVerificationStatus: hasAiMismatch ? 'DIFF_ACCEPTED' : (item.aiVerificationStatus || 'NOT_PERFORMED'),
-            aiDiffNotes: item.aiDiffNotes || (hasAiMismatch ? aiMismatchDescription : null),
-            clientDeviceTimestamp: item.clientDeviceTimestamp ? new Date(item.clientDeviceTimestamp) : null,
-            localCreationTimestamp: item.localCreationTimestamp ? new Date(item.localCreationTimestamp) : null,
-            serverReceivedTimestamp: new Date(),
-            syncStatus: 'SYNCED',
-            paymentEligibility: !isFlagged && farmer.bankVerificationStatus === 'VERIFIED',
-            isFlagged,
-            flagReason
+        let purchase: any = null;
+        let attempts = 0;
+        while (!purchase && attempts < 5) {
+          try {
+            purchase = await prisma.purchase.create({
+              data: {
+                slipNumber,
+                idempotencyKey: key,
+                farmerId: farmer.id,
+                centreId: centre.id,
+                crop,
+                grade,
+                grossWeight: Math.round(numGross * 10) / 10,
+                tareWeight: Math.round(numTare * 10) / 10,
+                actualWeight: calcResult.actualWeight,
+                moisture: Math.round(numMoisture * 10) / 10,
+                moistureDeductionPercent: calcResult.moistureDeductionPercent,
+                netWeight: calcResult.netWeight,
+                ratePerQuintal: appliedRate,
+                totalAmount: calcResult.totalAmount,
+                status,
+                scalePhotoUrl: item.scalePhotoUrl || null,
+                moisturePhotoUrl: item.moisturePhotoUrl || null,
+                scaleAiWeight: item.scaleAiWeight || null,
+                moistureAiValue: item.moistureAiValue || null,
+                aiConfidence: item.aiConfidence || null,
+                aiVerificationStatus: hasAiMismatch ? 'DIFF_ACCEPTED' : (item.aiVerificationStatus || 'NOT_PERFORMED'),
+                aiDiffNotes: item.aiDiffNotes || (hasAiMismatch ? aiMismatchDescription : null),
+                clientDeviceTimestamp: item.clientDeviceTimestamp ? new Date(item.clientDeviceTimestamp) : null,
+                localCreationTimestamp: item.localCreationTimestamp ? new Date(item.localCreationTimestamp) : null,
+                serverReceivedTimestamp: new Date(),
+                syncStatus: 'SYNCED',
+                paymentEligibility: !isFlagged && farmer.bankVerificationStatus === 'VERIFIED',
+                isFlagged,
+                flagReason
+              }
+            });
+          } catch (createErr: any) {
+            if (createErr.code === 'P2002' && attempts < 4) {
+              attempts++;
+              slipNumber = `${centre.code}-${24500 + Math.floor(Math.random() * 100000)}`;
+              continue;
+            }
+            throw createErr;
           }
-        });
+        }
 
         // Create Anomaly Flag entries
         if (anomalyCheck.isFlagged) {
