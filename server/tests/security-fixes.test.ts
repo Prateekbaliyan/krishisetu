@@ -80,6 +80,12 @@ describe('KrishiSetu Security, Hardening & Compliance Verification Suite', () =>
         }
       });
     }
+    // Ensure seeded active prices have effective date covering the past 7 days
+    const pastEffectiveDate = new Date(Date.now() - 7 * 24 * 60 * 60 * 1000).toISOString().slice(0, 10);
+    await prisma.priceBoard.updateMany({
+      where: { isActive: true },
+      data: { effectiveDate: pastEffectiveDate }
+    });
   });
 
   beforeEach(() => {
@@ -319,8 +325,8 @@ describe('KrishiSetu Security, Hardening & Compliance Verification Suite', () =>
     });
   });
 
-  // 3. Offline Sync Pricing Hardening
-  describe('3. Offline Sync Pricing Hardening', () => {
+  // 3. Offline Sync Pricing & Timestamp Validation
+  describe('3. Offline Sync Pricing & Timestamp Validation', () => {
     it('ignores fake client price and strictly applies central database price', async () => {
       const activePrice = await prisma.priceBoard.findFirst({
         where: { crop: 'Soybean', grade: 'Grade A', isActive: true }
@@ -362,6 +368,216 @@ describe('KrishiSetu Security, Hardening & Compliance Verification Suite', () =>
       expect(purchase).toBeDefined();
       expect(purchase!.ratePerQuintal).toBe(activePrice!.ratePerQuintal);
       expect(purchase!.ratePerQuintal).not.toBe(fakePrice);
+    });
+
+    it('accepts a valid timestamp within the permitted offline window (up to 7 days)', async () => {
+      const validPastTimestamp = new Date(Date.now() - 2 * 24 * 60 * 60 * 1000).toISOString(); // 2 days ago
+      const syncKey = `offline-valid-window-${Date.now()}`;
+
+      const res = await request(app)
+        .post('/api/sync/batch')
+        .set('Authorization', `Bearer ${operatorToken}`)
+        .send({
+          clientId: 'tablet-01',
+          items: [
+            {
+              idempotencyKey: syncKey,
+              clientId: 'tablet-01',
+              farmerId: testFarmer.id,
+              centreId: testCentre.id,
+              crop: 'Soybean',
+              grade: 'Grade A',
+              grossWeight: 450.0,
+              tareWeight: 10.0,
+              moisture: 11.0,
+              localCreationTimestamp: validPastTimestamp
+            }
+          ]
+        });
+
+      expect(res.status).toBe(200);
+      expect(res.body.batchSummary.syncedCount).toBe(1);
+      expect(res.body.results[0].status).toBe('SYNCED');
+
+      const purchase = await prisma.purchase.findUnique({
+        where: { idempotencyKey: syncKey }
+      });
+      expect(purchase).toBeDefined();
+      expect(purchase!.localCreationTimestamp).toBeDefined();
+      expect(new Date(purchase!.localCreationTimestamp!).toISOString()).toBe(new Date(validPastTimestamp).toISOString());
+    });
+
+    it('rejects malformed procurement timestamps and empty timestamps', async () => {
+      const malformedKey = `offline-malformed-${Date.now()}`;
+      const emptyKey = `offline-empty-${Date.now()}`;
+
+      const res = await request(app)
+        .post('/api/sync/batch')
+        .set('Authorization', `Bearer ${operatorToken}`)
+        .send({
+          clientId: 'tablet-01',
+          items: [
+            {
+              idempotencyKey: malformedKey,
+              farmerId: testFarmer.id,
+              centreId: testCentre.id,
+              crop: 'Soybean',
+              grade: 'Grade A',
+              grossWeight: 400.0,
+              tareWeight: 10.0,
+              moisture: 11.0,
+              localCreationTimestamp: 'not-a-valid-date-time'
+            },
+            {
+              idempotencyKey: emptyKey,
+              farmerId: testFarmer.id,
+              centreId: testCentre.id,
+              crop: 'Soybean',
+              grade: 'Grade A',
+              grossWeight: 400.0,
+              tareWeight: 10.0,
+              moisture: 11.0,
+              localCreationTimestamp: '   '
+            }
+          ]
+        });
+
+      expect(res.status).toBe(200);
+      expect(res.body.batchSummary.failedCount).toBe(2);
+      expect(res.body.results[0].status).toBe('FAILED');
+      expect(res.body.results[0].error).toMatch(/Malformed procurement timestamp/i);
+      expect(res.body.results[1].status).toBe('FAILED');
+      expect(res.body.results[1].error).toMatch(/Missing or empty procurement timestamp/i);
+    });
+
+    it('rejects timestamps beyond the permitted future tolerance (> 15 minutes ahead)', async () => {
+      const futureKey = `offline-future-skew-${Date.now()}`;
+      const thirtyMinsAhead = new Date(Date.now() + 30 * 60 * 1000).toISOString(); // 30 minutes in future
+
+      const res = await request(app)
+        .post('/api/sync/batch')
+        .set('Authorization', `Bearer ${operatorToken}`)
+        .send({
+          clientId: 'tablet-01',
+          items: [
+            {
+              idempotencyKey: futureKey,
+              farmerId: testFarmer.id,
+              centreId: testCentre.id,
+              crop: 'Soybean',
+              grade: 'Grade A',
+              grossWeight: 400.0,
+              tareWeight: 10.0,
+              moisture: 11.0,
+              localCreationTimestamp: thirtyMinsAhead
+            }
+          ]
+        });
+
+      expect(res.status).toBe(200);
+      expect(res.body.batchSummary.failedCount).toBe(1);
+      expect(res.body.results[0].status).toBe('FAILED');
+      expect(res.body.results[0].error).toMatch(/Unreasonable future timestamp.*ahead of server time/i);
+    });
+
+    it('rejects timestamps older than the permitted offline window (> 7 days)', async () => {
+      const excessivelyOldKey = `offline-old-record-${Date.now()}`;
+      const tenDaysAgo = new Date(Date.now() - 10 * 24 * 60 * 60 * 1000).toISOString(); // 10 days in past
+
+      const res = await request(app)
+        .post('/api/sync/batch')
+        .set('Authorization', `Bearer ${operatorToken}`)
+        .send({
+          clientId: 'tablet-01',
+          items: [
+            {
+              idempotencyKey: excessivelyOldKey,
+              farmerId: testFarmer.id,
+              centreId: testCentre.id,
+              crop: 'Soybean',
+              grade: 'Grade A',
+              grossWeight: 400.0,
+              tareWeight: 10.0,
+              moisture: 11.0,
+              localCreationTimestamp: tenDaysAgo
+            }
+          ]
+        });
+
+      expect(res.status).toBe(200);
+      expect(res.body.batchSummary.failedCount).toBe(1);
+      expect(res.body.results[0].status).toBe('FAILED');
+      expect(res.body.results[0].error).toMatch(/Excessively old procurement timestamp.*maximum allowed offline sync window/i);
+    });
+
+    it('verifies that the server sync timestamp is recorded independently from client timestamp', async () => {
+      const syncKey = `offline-server-ts-${Date.now()}`;
+      const clientPastTimestamp = new Date(Date.now() - 24 * 60 * 60 * 1000).toISOString(); // 1 day ago
+      const beforeCall = Date.now();
+
+      const res = await request(app)
+        .post('/api/sync/batch')
+        .set('Authorization', `Bearer ${operatorToken}`)
+        .send({
+          clientId: 'tablet-01',
+          items: [
+            {
+              idempotencyKey: syncKey,
+              farmerId: testFarmer.id,
+              centreId: testCentre.id,
+              crop: 'Soybean',
+              grade: 'Grade A',
+              grossWeight: 400.0,
+              tareWeight: 10.0,
+              moisture: 11.0,
+              localCreationTimestamp: clientPastTimestamp
+            }
+          ]
+        });
+
+      expect(res.status).toBe(200);
+      expect(res.body.batchSummary.syncedCount).toBe(1);
+
+      const purchase = await prisma.purchase.findUnique({
+        where: { idempotencyKey: syncKey }
+      });
+      expect(purchase).toBeDefined();
+
+      // Client creation timestamp reflects the tablet's creation date (~1 day ago)
+      const clientTime = new Date(purchase!.localCreationTimestamp!).getTime();
+      expect(Math.abs(clientTime - new Date(clientPastTimestamp).getTime())).toBeLessThan(1000);
+
+      // Server received timestamp reflects actual server arrival time (now)
+      const serverTime = new Date(purchase!.serverReceivedTimestamp).getTime();
+      expect(serverTime).toBeGreaterThanOrEqual(beforeCall - 1000);
+      expect(serverTime).toBeLessThanOrEqual(Date.now() + 1000);
+    });
+
+    it('verifies that the client timestamp cannot manipulate selected rate outside permitted policy', async () => {
+      // Future timestamp manipulation is rejected
+      const futureKey = `offline-rate-manip-${Date.now()}`;
+      const resFuture = await request(app)
+        .post('/api/sync/batch')
+        .set('Authorization', `Bearer ${operatorToken}`)
+        .send({
+          clientId: 'tablet-01',
+          items: [
+            {
+              idempotencyKey: futureKey,
+              farmerId: testFarmer.id,
+              centreId: testCentre.id,
+              crop: 'Soybean',
+              grade: 'Grade A',
+              grossWeight: 400.0,
+              tareWeight: 10.0,
+              moisture: 11.0,
+              localCreationTimestamp: new Date(Date.now() + 2 * 60 * 60 * 1000).toISOString() // 2 hours ahead
+            }
+          ]
+        });
+
+      expect(resFuture.body.batchSummary.failedCount).toBe(1);
+      expect(resFuture.body.results[0].status).toBe('FAILED');
     });
 
     it('rejects sync record when no active published price exists, or when price is expired or future-dated', async () => {
@@ -471,7 +687,7 @@ describe('KrishiSetu Security, Hardening & Compliance Verification Suite', () =>
               grossWeight: 500.0,
               tareWeight: 10.0,
               moisture: 11.0,
-              localCreationTimestamp: '2026-11-01T10:00:00.000Z' // Earlier than effective date
+              localCreationTimestamp: new Date(Date.now() - 24 * 3600 * 1000).toISOString() // 1 day ago, earlier than 2099
             }
           ]
         });
@@ -482,46 +698,6 @@ describe('KrishiSetu Security, Hardening & Compliance Verification Suite', () =>
       expect(resFuture.body.results[0].error).toMatch(/No applicable published daily price found.*on or before procurement date/i);
 
       await prisma.priceBoard.delete({ where: { id: futurePriceRecord.id } });
-    });
-
-    it('uses server database price when valid published price exists and applies latest applicable rate', async () => {
-      const turPrice = await prisma.priceBoard.findFirst({
-        where: { crop: 'Tur', grade: 'Grade A', isActive: true }
-      });
-      expect(turPrice).toBeDefined();
-
-      const syncKey = `offline-tur-price-${Date.now()}`;
-
-      const res = await request(app)
-        .post('/api/sync/batch')
-        .set('Authorization', `Bearer ${operatorToken}`)
-        .send({
-          clientId: 'tablet-01',
-          items: [
-            {
-              idempotencyKey: syncKey,
-              clientId: 'tablet-01',
-              farmerId: testFarmer.id,
-              centreId: testCentre.id,
-              crop: 'Tur',
-              grade: 'Grade A',
-              grossWeight: 400.0,
-              tareWeight: 10.0,
-              moisture: 10.0,
-              clientDeviceTimestamp: new Date().toISOString(),
-              localCreationTimestamp: new Date().toISOString()
-            }
-          ]
-        });
-
-      expect(res.status).toBe(200);
-      expect(res.body.batchSummary.syncedCount).toBe(1);
-
-      const purchase = await prisma.purchase.findUnique({
-        where: { idempotencyKey: syncKey }
-      });
-      expect(purchase).toBeDefined();
-      expect(purchase!.ratePerQuintal).toBe(turPrice!.ratePerQuintal);
     });
 
     it('retried sync request does not create duplicate procurement entries', async () => {
@@ -573,11 +749,12 @@ describe('KrishiSetu Security, Hardening & Compliance Verification Suite', () =>
     });
   });
 
-  // 4. Online Procurement Price Validation
-  describe('4. Online Procurement Price Validation', () => {
+  // 4. Online Procurement Price & Effective-Date Validation
+  describe('4. Online Procurement Price & Effective-Date Validation', () => {
     it('completely ignores client-supplied rate and strictly applies central published daily price', async () => {
       const activePrice = await prisma.priceBoard.findFirst({
-        where: { crop: 'Soybean', grade: 'Grade A', isActive: true }
+        where: { crop: 'Soybean', grade: 'Grade A', isActive: true },
+        orderBy: { effectiveDate: 'desc' }
       });
       expect(activePrice).toBeDefined();
 
@@ -603,15 +780,15 @@ describe('KrishiSetu Security, Hardening & Compliance Verification Suite', () =>
       expect(res.body.purchase.ratePerQuintal).not.toBe(maliciousTamperedRate);
     });
 
-    it('rejects purchase creation when crop or grade has no active published rate', async () => {
+    it('rejects purchase creation when crop or grade has no applicable published rate', async () => {
       const res = await request(app)
         .post('/api/purchases')
         .set('Authorization', `Bearer ${operatorToken}`)
         .send({
           farmerId: testFarmer.id,
           centreId: testCentre.id,
-          crop: 'NonExistentCrop',
-          grade: 'Grade Z',
+          crop: 'Soybean',
+          grade: 'Grade Z', // Non-existent grade
           grossWeight: 500.0,
           tareWeight: 10.0,
           moisture: 11.0
@@ -619,7 +796,134 @@ describe('KrishiSetu Security, Hardening & Compliance Verification Suite', () =>
 
       expect(res.status).toBe(400);
       expect(res.body.success).toBe(false);
-      expect(res.body.error).toMatch(/No published daily rate found/i);
+      expect(res.body.error).toMatch(/No applicable published daily rate found/i);
+    });
+
+    it('rejects online procurement when published price is future-effective', async () => {
+      const futurePriceRecord = await prisma.priceBoard.create({
+        data: {
+          crop: 'Soybean',
+          grade: 'Grade B',
+          ratePerQuintal: 5500.00,
+          effectiveDate: '2099-01-01', // Far future date
+          publishedBy: 'System Test',
+          isActive: true
+        }
+      });
+
+      try {
+        const res = await request(app)
+          .post('/api/purchases')
+          .set('Authorization', `Bearer ${operatorToken}`)
+          .send({
+            farmerId: testFarmer.id,
+            centreId: testCentre.id,
+            crop: 'Soybean',
+            grade: 'Grade B',
+            grossWeight: 500.0,
+            tareWeight: 10.0,
+            moisture: 11.0
+          });
+
+        expect(res.status).toBe(400);
+        expect(res.body.success).toBe(false);
+        expect(res.body.error).toMatch(/No applicable published daily rate found.*on or before procurement date/i);
+      } finally {
+        await prisma.priceBoard.delete({ where: { id: futurePriceRecord.id } });
+      }
+    });
+
+    it('ignores inactive prices during online procurement', async () => {
+      const inactivePriceRecord = await prisma.priceBoard.create({
+        data: {
+          crop: 'Soybean',
+          grade: 'Grade B',
+          ratePerQuintal: 4300.00,
+          effectiveDate: '2020-01-01',
+          publishedBy: 'System Test',
+          isActive: false // Inactive
+        }
+      });
+
+      try {
+        const res = await request(app)
+          .post('/api/purchases')
+          .set('Authorization', `Bearer ${operatorToken}`)
+          .send({
+            farmerId: testFarmer.id,
+            centreId: testCentre.id,
+            crop: 'Soybean',
+            grade: 'Grade B',
+            grossWeight: 500.0,
+            tareWeight: 10.0,
+            moisture: 11.0
+          });
+
+        expect(res.status).toBe(400);
+        expect(res.body.success).toBe(false);
+        expect(res.body.error).toMatch(/No applicable published daily rate found/i);
+      } finally {
+        await prisma.priceBoard.delete({ where: { id: inactivePriceRecord.id } });
+      }
+    });
+
+    it('selects the latest applicable effective price when multiple prices exist', async () => {
+      const olderPrice = await prisma.priceBoard.create({
+        data: {
+          crop: 'Tur',
+          grade: 'Grade B',
+          ratePerQuintal: 6800.00,
+          effectiveDate: '2026-01-01',
+          publishedBy: 'System Test',
+          isActive: true
+        }
+      });
+
+      const latestPrice = await prisma.priceBoard.create({
+        data: {
+          crop: 'Tur',
+          grade: 'Grade B',
+          ratePerQuintal: 7150.00,
+          effectiveDate: '2026-06-01', // More recent applicable date
+          publishedBy: 'System Test',
+          isActive: true
+        }
+      });
+
+      const futurePrice = await prisma.priceBoard.create({
+        data: {
+          crop: 'Tur',
+          grade: 'Grade B',
+          ratePerQuintal: 8500.00,
+          effectiveDate: '2099-01-01', // Future date
+          publishedBy: 'System Test',
+          isActive: true
+        }
+      });
+
+      try {
+        const res = await request(app)
+          .post('/api/purchases')
+          .set('Authorization', `Bearer ${operatorToken}`)
+          .send({
+            farmerId: testFarmer.id,
+            centreId: testCentre.id,
+            crop: 'Tur',
+            grade: 'Grade B',
+            grossWeight: 400.0,
+            tareWeight: 10.0,
+            moisture: 10.0
+          });
+
+        expect(res.status).toBe(201);
+        expect(res.body.success).toBe(true);
+        // Must select latestPrice (7150.00), not olderPrice (6800.00) or futurePrice (8500.00)
+        expect(res.body.purchase.ratePerQuintal).toBe(7150.00);
+      } finally {
+        await prisma.priceBoard.deleteMany({
+          where: { id: { in: [olderPrice.id, latestPrice.id, futurePrice.id] } }
+        });
+      }
     });
   });
 

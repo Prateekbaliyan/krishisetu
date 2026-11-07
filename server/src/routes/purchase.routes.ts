@@ -165,18 +165,34 @@ router.post('/', authenticateToken, async (req, res) => {
     const selectedCrop = crop || 'Soybean';
     const selectedGrade = grade || 'Grade A';
 
+    if (selectedCrop !== 'Soybean' && selectedCrop !== 'Tur') {
+      return res.status(400).json({
+        success: false,
+        error: `Invalid or unsupported crop: ${selectedCrop}. Supported crops: Soybean, Tur.`
+      });
+    }
+
+    // Trusted server-side procurement date (YYYY-MM-DD)
+    const serverProcurementDateStr = new Date().toISOString().slice(0, 10);
+
+    // Select only prices where crop & grade match, isActive === true, and effectiveDate <= serverProcurementDate
+    // Ordered by effectiveDate descending to select the latest applicable published price
     const activePrice = await prisma.priceBoard.findFirst({
       where: {
         crop: selectedCrop,
         grade: selectedGrade,
-        isActive: true
+        isActive: true,
+        effectiveDate: { lte: serverProcurementDateStr }
+      },
+      orderBy: {
+        effectiveDate: 'desc'
       }
     });
 
     if (!activePrice) {
       return res.status(400).json({
         success: false,
-        error: `No published daily rate found for ${selectedCrop} (${selectedGrade}). Office Manager must publish prices first.`
+        error: `No applicable published daily rate found for ${selectedCrop} (${selectedGrade}) on or before procurement date (${serverProcurementDateStr}). Office Manager must publish prices first.`
       });
     }
 

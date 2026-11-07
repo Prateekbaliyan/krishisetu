@@ -28,7 +28,7 @@ KrishiSetu is an enterprise SaaS platform that bridges remote village collection
 | **Database & ORM** | PostgreSQL (Supabase/Render) / SQLite (Local Dev), Prisma ORM | Dual schema support allowing zero-config local runs and scalable cloud SQL |
 | **Authentication** | JWT, bcryptjs | Stateless, role-based access control with fail-fast production secret validation |
 | **AI Vision OCR** | Google Gemini Vision API (`gemini-3.5-flash-lite`) | Actual multimodal image analysis for electronic weighing scale & moisture meter displays |
-| **Automated Testing** | Vitest, Supertest | Fast unit and end-to-end integration test execution (52 passing automated tests) |
+| **Automated Testing** | Vitest, Supertest | Fast unit and end-to-end integration test execution (60 passing automated tests) |
 
 ---
 
@@ -99,15 +99,23 @@ flowchart TD
   - The manager's identity is strictly derived from the verified server-side JWT session (`req.user`), completely ignoring any client-supplied `managerId` to prevent identity spoofing by Centre Operators.
   - Stores `reviewerId`, `reviewDecision`, `reviewedBy`, `reviewedAt`, and `reviewNotes` in the purchase record.
 
-### 4.2. Procurement Daily Price Board & Server Enforcement
+### 4.2. Procurement Daily Price Board & Unified Effective-Date Policy
 
 - **Module:** `server/src/routes/purchase.routes.ts` & `server/src/routes/sync.routes.ts`
 - **Security Rule:** **Never trust client-supplied rates.**
-- **Backend Flow:**
+- **Unified Online & Offline Price Selection Policy:**
   1. The server receives crop (e.g. Soybean) and grade (e.g. Grade A).
-  2. Queries `PriceBoard` for the active published price (`isActive: true`).
-  3. If no active price exists, the request is rejected with HTTP 400.
-  4. The centrally published rate is assigned to `ratePerQuintal` and used in decimal-safe math. Client-supplied rate parameters are completely ignored.
+  2. Resolves the applicable procurement accounting date:
+     - **Online Procurement:** Trusted current server date (`new Date().toISOString().slice(0, 10)`).
+     - **Offline Sync:** Validated client procurement date (`localCreationTimestamp` or `clientDeviceTimestamp`) within the allowed window.
+  3. Queries `PriceBoard` for rates matching:
+     - `crop === selectedCrop`
+     - `grade === selectedGrade`
+     - `isActive === true`
+     - `effectiveDate <= procurementDate` (Never applies future-dated prices to past procurements)
+  4. Orders by `effectiveDate DESC` to select the latest applicable published rate.
+  5. If no active price exists on or before the procurement date, the transaction is rejected with HTTP 400 (online) or marked `status: 'FAILED'` (offline sync).
+  6. The centrally published rate is strictly assigned to `ratePerQuintal` and used in decimal-safe arithmetic. Client-supplied rates and hardcoded fallbacks are completely eliminated.
 
 ### 4.3. Decimal-Safe Procurement Arithmetic
 
@@ -120,11 +128,19 @@ flowchart TD
 - **Rounding Rules:** Weights are rounded to 1 decimal place (0.1 kg); monetary amounts are rounded to 2 decimal places (₹0.01).
 - **Validation Gates:** Gross weight must exceed tare weight; negative values and zero weights are rejected.
 
-### 4.4. Offline-First Synchronization & Conflict Handling
+### 4.4. Offline-First Synchronization, Timestamp Validation & Conflict Handling
 
 - **Module:** `client/src/services/syncManager.ts` & `server/src/routes/sync.routes.ts`
 - **Storage:** Dexie IndexedDB maintains `offlineQueue`, `cachedFarmers`, and `cachedPrices`.
 - **Idempotency:** Every client-generated purchase generates a UUID `idempotencyKey`. The server checks the key in `Purchase` and `SyncRecord` tables. If already processed, it returns `DUPLICATE_SKIPPED` with the existing slip number, guaranteeing zero duplicate entries.
+- **Client Timestamp Validation Policy:**
+  - **Parseability Requirement:** The client must provide a non-empty `localCreationTimestamp` or `clientDeviceTimestamp`. Malformed or unparseable timestamps are rejected immediately with HTTP 200 `status: 'FAILED'`.
+  - **Maximum Permitted Offline Sync Age:** **7 days (168 hours)**. Remote collection centres in rural talukas operate offline during daily sessions; all offline procurement queues must sync within the weekly accounting window. Records older than 7 days are rejected as stale/suspicious to prevent retroactive rate arbitrage.
+  - **Future Clock Skew Tolerance:** **15 minutes**. Accommodates standard client hardware clock drift. Timestamps more than 15 minutes ahead of the central server clock are rejected as unreasonable.
+  - **Independent Server Timestamp Recording:**
+    - `localCreationTimestamp` / `clientDeviceTimestamp`: Client-reported accounting creation time, used for daily price grid lookup within the permitted 7-day window.
+    - `serverReceivedTimestamp`: The actual central server receipt timestamp, stamped via server `new Date()`. Both timestamps are recorded in the database and audit trail.
+  - **Documented Security Assumption:** Client-supplied device timestamps are never assumed cryptographically tamper-proof on an untrusted or clock-altered device. Enforcing the 7-day historical ceiling and 15-minute future tolerance prevents operators or compromised tablets from backdating purchases outside the authorized window.
 - **Auto-Sync:** `SyncContext` monitors `window.addEventListener('online')` and triggers automatic queue draining when internet returns.
 - **Non-Discard Guarantee:** Failed sync items are marked `status: 'FAILED'` with server error messages in IndexedDB, surviving browser refreshes and allowing operator review and retry.
 
@@ -166,14 +182,15 @@ flowchart TD
 
 ## 5. Verification & Automated Test Results
 
-The repository features 52 automated tests across 5 test suites (100% passing):
+The repository features 60 automated tests across 5 test suites (100% passing):
 
-1. **`server/tests/security-fixes.test.ts` (22/22 passed):**
+1. **`server/tests/security-fixes.test.ts` (30/30 passed):**
    - Production JWT secret validation (fail-fast on missing/insecure secret).
    - AI mismatch blocks operator procurement creation.
    - Authorized Office Manager approval allows AI variance creation.
-   - Client-supplied procurement price is completely ignored.
-   - Unpublished or invalid crop prices are rejected.
+   - Online procurement price validation: future-effective prices rejected, inactive prices ignored, latest applicable price selected, client rates ignored.
+   - Offline sync timestamp validation: malformed timestamps rejected, future skew (>15 mins) rejected, excessive age (>7 days) rejected, server receipt timestamp recorded independently.
+   - Unpublished or invalid crop prices rejected.
    - Operator centre access boundary enforcement (listing, creating, and retrieving slips).
    - Repeated offline sync does not duplicate purchases.
    - Flagged transactions cannot enter payment runs.

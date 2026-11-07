@@ -22,6 +22,11 @@ async function generateUniqueSlipNumber(centreCode: string): Promise<string> {
   return slip;
 }
 
+export const MAX_OFFLINE_SYNC_AGE_DAYS = 7;
+export const MAX_OFFLINE_SYNC_AGE_MS = MAX_OFFLINE_SYNC_AGE_DAYS * 24 * 60 * 60 * 1000; // 7 days (168 hours)
+export const MAX_FUTURE_CLOCK_TOLERANCE_MINUTES = 15;
+export const MAX_FUTURE_CLOCK_TOLERANCE_MS = MAX_FUTURE_CLOCK_TOLERANCE_MINUTES * 60 * 1000; // 15 minutes
+
 const router = Router();
 
 export interface OfflinePurchaseItem {
@@ -128,7 +133,7 @@ router.post('/batch', authenticateToken, async (req, res) => {
           throw new Error(`Collection centre ${item.centreId} not found.`);
         }
 
-        // 4. Central Published Daily Price Validation (Zero Trust for Client Price)
+        // 4. Central Published Daily Price Validation & Client Timestamp Hardening
         const crop = item.crop;
         const grade = item.grade || 'Grade A';
 
@@ -136,16 +141,30 @@ router.post('/batch', authenticateToken, async (req, res) => {
           throw new Error(`Invalid or unsupported crop: ${crop || 'unspecified'}. Supported crops: Soybean, Tur.`);
         }
 
-        // Determine applicable procurement date from client timestamp (localCreationTimestamp preferred)
-        const rawProcurementDate = item.localCreationTimestamp || item.clientDeviceTimestamp;
-        let procurementDate = new Date();
-        if (rawProcurementDate) {
-          const parsed = new Date(rawProcurementDate);
-          if (!isNaN(parsed.getTime())) {
-            procurementDate = parsed;
-          }
+        // Validate client-reported procurement timestamp (reject malformed, excessive future skew, or expired age)
+        const rawTimestamp = item.localCreationTimestamp || item.clientDeviceTimestamp;
+        if (!rawTimestamp || typeof rawTimestamp !== 'string' || rawTimestamp.trim() === '') {
+          throw new Error('Missing or empty procurement timestamp: Offline records must supply a valid localCreationTimestamp or clientDeviceTimestamp.');
         }
-        const procurementDateStr = procurementDate.toISOString().slice(0, 10);
+
+        const clientProcurementDate = new Date(rawTimestamp);
+        if (isNaN(clientProcurementDate.getTime())) {
+          throw new Error(`Malformed procurement timestamp: "${rawTimestamp}" is not a valid date.`);
+        }
+
+        const serverNow = new Date();
+        const futureDiffMs = clientProcurementDate.getTime() - serverNow.getTime();
+        if (futureDiffMs > MAX_FUTURE_CLOCK_TOLERANCE_MS) {
+          throw new Error(`Unreasonable future timestamp: Client reported date (${clientProcurementDate.toISOString()}) is ahead of server time by ${Math.round(futureDiffMs / 60000)} minutes (maximum tolerance is ${MAX_FUTURE_CLOCK_TOLERANCE_MINUTES} minutes).`);
+        }
+
+        const pastAgeMs = serverNow.getTime() - clientProcurementDate.getTime();
+        if (pastAgeMs > MAX_OFFLINE_SYNC_AGE_MS) {
+          const ageDays = (pastAgeMs / (24 * 60 * 60 * 1000)).toFixed(1);
+          throw new Error(`Excessively old procurement timestamp: Record is ${ageDays} days old (maximum allowed offline sync window is ${MAX_OFFLINE_SYNC_AGE_DAYS} days).`);
+        }
+
+        const procurementDateStr = clientProcurementDate.toISOString().slice(0, 10);
 
         // Select the latest valid published price effective on or before the procurement date.
         // Never apply a future-dated price to an earlier procurement; never trust client-supplied rates!
@@ -211,7 +230,7 @@ router.post('/batch', authenticateToken, async (req, res) => {
           grossWeight: numGross,
           netWeight: calcResult.netWeight,
           moisture: numMoisture,
-          purchaseDate: item.localCreationTimestamp ? new Date(item.localCreationTimestamp) : new Date()
+          purchaseDate: clientProcurementDate
         });
 
         const isFlagged = anomalyCheck.isFlagged || hasAiMismatch;
@@ -255,8 +274,8 @@ router.post('/batch', authenticateToken, async (req, res) => {
                 aiVerificationStatus: hasAiMismatch ? 'DIFF_ACCEPTED' : (item.aiVerificationStatus || 'NOT_PERFORMED'),
                 aiDiffNotes: item.aiDiffNotes || (hasAiMismatch ? aiMismatchDescription : null),
                 clientDeviceTimestamp: item.clientDeviceTimestamp ? new Date(item.clientDeviceTimestamp) : null,
-                localCreationTimestamp: item.localCreationTimestamp ? new Date(item.localCreationTimestamp) : null,
-                serverReceivedTimestamp: new Date(),
+                localCreationTimestamp: item.localCreationTimestamp ? new Date(item.localCreationTimestamp) : clientProcurementDate,
+                serverReceivedTimestamp: serverNow,
                 syncStatus: 'SYNCED',
                 paymentEligibility: !isFlagged && farmer.bankVerificationStatus === 'VERIFIED',
                 isFlagged,
@@ -339,7 +358,10 @@ router.post('/batch', authenticateToken, async (req, res) => {
             isFlagged,
             hasAiMismatch,
             flagReason,
-            totalAmount: purchase.totalAmount
+            totalAmount: purchase.totalAmount,
+            clientReportedTimestamp: rawTimestamp,
+            serverReceivedTimestamp: serverNow.toISOString(),
+            syncAgeHours: Math.round((serverNow.getTime() - clientProcurementDate.getTime()) / (3600 * 1000) * 10) / 10
           }
         });
 
