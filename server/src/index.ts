@@ -30,8 +30,9 @@ const app = express();
 const PORT = process.env.PORT || 5000;
 
 // Security & Middlewares
+const clientOrigin = process.env.CLIENT_URL;
 app.use(cors({
-  origin: process.env.CLIENT_URL || '*',
+  origin: clientOrigin ? (clientOrigin.includes(',') ? clientOrigin.split(',').map(s => s.trim()) : clientOrigin) : true,
   credentials: true
 }));
 app.use(express.json({ limit: '10mb' }));
